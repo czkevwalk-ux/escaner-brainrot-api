@@ -8,75 +8,53 @@ app.use(bodyParser.json());
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// --- 🛠️ UTILIDADES ---
-function parseGenValue(text) {
-    if (!text) return 0;
-    const clean = text.toUpperCase().replace(/\s/g, '');
-    const num = parseFloat(clean.match(/\d+\.?\d*/) || 0);
-    if (clean.includes('B')) return num * 1000;
-    return num;
-}
-
-function getWebhookByVPS(vpsName) {
-    const num = parseInt(vpsName.replace(/\D/g, '') || 0);
-    if (num >= 1 && num <= 3) return process.env.WEBHOOK_1;
-    if (num >= 4 && num <= 6) return process.env.WEBHOOK_2;
-    if (num >= 7 && num <= 9) return process.env.WEBHOOK_3;
-    if (num >= 10 && num <= 12) return process.env.WEBHOOK_4;
-    if (num >= 13 && num <= 15) return process.env.WEBHOOK_5;
-    if (num >= 16) return process.env.WEBHOOK_6;
-    return process.env.WEBHOOK_1;
-}
-
-// --- 🎯 ASIGNAR SERVIDOR (NUEVA LÓGICA MÁS FUERTE) ---
+// --- ASIGNAR SERVIDOR (SIN CHOCAR) ---
 app.get('/get-server', async (req, res) => {
-    // 1. Buscamos un servidor pendiente
-    const { data: server, error } = await supabase
+    // 1. Buscamos el primer servidor que esté libre
+    const { data, error } = await supabase
         .from('servidores')
         .select('job_id')
         .eq('estado', 'pendiente')
-        .limit(1)
-        .maybeSingle();
+        .limit(1);
 
-    if (server) {
-        // 2. Lo marcamos como 'completado' de una vez para que nadie más lo use
-        await supabase
-            .from('servidores')
-            .update({ estado: 'completado', ultima_revision: new Date() })
-            .eq('job_id', server.job_id);
+    if (data && data.length > 0) {
+        const targetId = data[0].job_id;
+        // 2. LO MARCAMOS COMO COMPLETADO AL INSTANTE 
+        // Esto evita que otro bot lo agarre en el mismo segundo
+        await supabase.from('servidores').update({ estado: 'completado' }).eq('job_id', targetId);
         
-        res.json({ job_id: server.job_id });
+        res.json({ job_id: targetId });
     } else {
-        res.status(404).json({ job_id: null });
+        res.json({ job_id: null });
     }
 });
 
-// --- 📝 REPORTAR HALLAZGOS ---
+// --- REPORTAR HALLAZGOS ---
 app.post('/add-server', async (req, res) => {
     const { jobId, brainrots, vps_name } = req.body;
-    if (!brainrots) return res.json({status: "no data"});
+    if (brainrots && brainrots.length > 0) {
+        // Guardar en base de datos
+        await supabase.from('hallazgos').insert(brainrots.map(p => ({
+            pet_name: p.name, valor_gen: p.gen, mutacion: p.mutation || "None", job_id: jobId, vps_name: vps_name
+        })));
 
-    // Guardar en Supabase
-    const insertData = brainrots.map(p => ({
-        pet_name: p.name, valor_gen: p.gen, mutacion: p.mutation || "None", job_id: jobId, vps_name: vps_name
-    }));
-    await supabase.from('hallazgos').insert(insertData);
+        // Enrutar a Discord (GRUPOS DE 3 VPS POR CANAL)
+        const num = parseInt(vps_name.replace(/\D/g, '') || 0);
+        let webhook = process.env.WEBHOOK_1;
+        if (num >= 4 && num <= 6) webhook = process.env.WEBHOOK_2;
+        if (num >= 7 && num <= 9) webhook = process.env.WEBHOOK_3;
+        if (num >= 10 && num <= 12) webhook = process.env.WEBHOOK_4;
+        if (num >= 13 && num <= 15) webhook = process.env.WEBHOOK_5;
+        if (num >= 16) webhook = process.env.WEBHOOK_6;
 
-    // Enviar a Discord (Filtro 30M)
-    const highValue = brainrots.filter(p => parseGenValue(p.gen) >= 30);
-    if (highValue.length > 0) {
-        const target = getWebhookByVPS(vps_name);
-        if (target) {
+        // Filtro de 30M para Discord
+        const valNum = (text) => parseFloat(text.match(/\d+\.?\d*/) || 0);
+        const vip = brainrots.filter(p => valNum(p.gen) >= 30);
+
+        if (vip.length > 0 && webhook) {
             let desc = "";
-            highValue.forEach(p => { desc += `💎 **${p.name}** | 📈 ${p.gen}\n`; });
-            axios.post(target, {
-                embeds: [{
-                    title: `🚨 HALLAZGO DETECTADO (${vps_name})`,
-                    description: desc + `\n🎮 **JobId:** \`${jobId}\``,
-                    color: 5793266,
-                    timestamp: new Date()
-                }]
-            }).catch(e => console.log("DC Error"));
+            vip.forEach(p => { desc += `💎 **${p.name}** [${p.gen}]\n`; });
+            axios.post(webhook, { embeds: [{ title: `🚨 HALLAZGO ${vps_name}`, description: desc + `\n🎮 **JobId:** \`${jobId}\``, color: 5793266 }] }).catch(e => {});
         }
     }
     res.json({ status: "ok" });
@@ -84,8 +62,7 @@ app.post('/add-server', async (req, res) => {
 
 app.post('/add-servers-bulk', async (req, res) => {
     const { job_ids } = req.body;
-    const insertData = job_ids.map(id => ({ job_id: id, estado: 'pendiente' }));
-    await supabase.from('servidores').upsert(insertData, { onConflict: 'job_id' });
+    await supabase.from('servidores').upsert(job_ids.map(id => ({ job_id: id, estado: 'pendiente' })), { onConflict: 'job_id' });
     res.json({ status: "ok" });
 });
 
