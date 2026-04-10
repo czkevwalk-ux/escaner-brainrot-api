@@ -6,56 +6,69 @@ const axios = require('axios');
 const app = express();
 app.use(bodyParser.json());
 
+// Conexión directa
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// --- ASIGNAR SERVIDOR (SIN CHOCAR) ---
+// --- 🎯 ASIGNAR SERVIDOR ---
 app.get('/get-server', async (req, res) => {
-    // 1. Buscamos el primer servidor que esté libre
+    // Buscamos un servidor pendiente de forma ultra simple
     const { data, error } = await supabase
         .from('servidores')
         .select('job_id')
         .eq('estado', 'pendiente')
         .limit(1);
 
+    if (error) {
+        console.error("Error DB:", error.message);
+        return res.status(500).json({ job_id: null });
+    }
+
     if (data && data.length > 0) {
         const targetId = data[0].job_id;
-        // 2. LO MARCAMOS COMO COMPLETADO AL INSTANTE 
-        // Esto evita que otro bot lo agarre en el mismo segundo
+        // Lo marcamos como 'completado' para que el próximo bot no lo use
         await supabase.from('servidores').update({ estado: 'completado' }).eq('job_id', targetId);
-        
-        res.json({ job_id: targetId });
+        return res.status(200).json({ job_id: targetId });
     } else {
-        res.json({ job_id: null });
+        return res.status(200).json({ job_id: null });
     }
 });
 
-// --- REPORTAR HALLAZGOS ---
+// --- 📝 REPORTAR HALLAZGOS ---
 app.post('/add-server', async (req, res) => {
     const { jobId, brainrots, vps_name } = req.body;
-    if (brainrots && brainrots.length > 0) {
-        // Guardar en base de datos
-        await supabase.from('hallazgos').insert(brainrots.map(p => ({
-            pet_name: p.name, valor_gen: p.gen, mutacion: p.mutation || "None", job_id: jobId, vps_name: vps_name
-        })));
+    if (!brainrots || brainrots.length === 0) return res.json({ status: "ok" });
 
-        // Enrutar a Discord (GRUPOS DE 3 VPS POR CANAL)
-        const num = parseInt(vps_name.replace(/\D/g, '') || 0);
-        let webhook = process.env.WEBHOOK_1;
-        if (num >= 4 && num <= 6) webhook = process.env.WEBHOOK_2;
-        if (num >= 7 && num <= 9) webhook = process.env.WEBHOOK_3;
-        if (num >= 10 && num <= 12) webhook = process.env.WEBHOOK_4;
-        if (num >= 13 && num <= 15) webhook = process.env.WEBHOOK_5;
-        if (num >= 16) webhook = process.env.WEBHOOK_6;
+    // Guardar en Supabase
+    await supabase.from('hallazgos').insert(brainrots.map(p => ({
+        pet_name: p.name, valor_gen: p.gen, mutacion: p.mutation || "None", job_id: jobId, vps_name: vps_name
+    })));
 
-        // Filtro de 30M para Discord
-        const valNum = (text) => parseFloat(text.match(/\d+\.?\d*/) || 0);
-        const vip = brainrots.filter(p => valNum(p.gen) >= 30);
+    // Enrutador de Discord
+    const vpsNum = parseInt(vps_name.replace(/\D/g, '') || 0);
+    let webhook = process.env.WEBHOOK_1;
+    if (vpsNum >= 4 && vpsNum <= 6) webhook = process.env.WEBHOOK_2;
+    if (vpsNum >= 7 && vpsNum <= 9) webhook = process.env.WEBHOOK_3;
+    if (vpsNum >= 10 && vpsNum <= 12) webhook = process.env.WEBHOOK_4;
+    if (vpsNum >= 13 && vpsNum <= 15) webhook = process.env.WEBHOOK_5;
+    if (vpsNum >= 16) webhook = process.env.WEBHOOK_6;
 
-        if (vip.length > 0 && webhook) {
-            let desc = "";
-            vip.forEach(p => { desc += `💎 **${p.name}** [${p.gen}]\n`; });
-            axios.post(webhook, { embeds: [{ title: `🚨 HALLAZGO ${vps_name}`, description: desc + `\n🎮 **JobId:** \`${jobId}\``, color: 5793266 }] }).catch(e => {});
-        }
+    // Solo enviamos a Discord si es valioso (Filtro 30M)
+    const highValue = brainrots.filter(p => {
+        const v = parseFloat(p.gen.match(/\d+\.?\d*/) || 0);
+        return p.gen.includes('B') ? v * 1000 >= 30 : v >= 30;
+    });
+
+    if (highValue.length > 0 && webhook) {
+        let desc = "";
+        highValue.forEach(p => { desc += `💎 **${p.name}** [${p.gen}]\n`; });
+        axios.post(webhook, {
+            embeds: [{
+                title: `🚨 HALLAZGO EN ${vps_name}`,
+                description: desc + `\n🎮 **ID:** \`${jobId}\``,
+                color: 5793266,
+                timestamp: new Date()
+            }]
+        }).catch(() => {});
     }
     res.json({ status: "ok" });
 });
@@ -71,4 +84,4 @@ app.get('/status', async (req, res) => {
     res.json({ servidores_pendientes: count });
 });
 
-app.listen(process.env.PORT || 8080);
+app.listen(process.env.PORT || 8080, () => console.log("Cerebro listo"));
