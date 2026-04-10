@@ -1,12 +1,12 @@
 {
   "name": "brainrot-api",
   "version": "1.0.0",
-  "description": "API para coordinar 1500 bots",
   "main": "index.js",
   "dependencies": {
     "express": "^4.18.2",
     "@supabase/supabase-js": "^2.38.4",
-    "body-parser": "^1.20.2"
+    "body-parser": "^1.20.2",
+    "axios": "^1.6.0"
   },
   "scripts": {
     "start": "node index.js"
