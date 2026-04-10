@@ -6,71 +6,85 @@ const axios = require('axios');
 const app = express();
 app.use(bodyParser.json());
 
-// Conexión directa
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// --- 🎯 ASIGNAR SERVIDOR ---
-app.get('/get-server', async (req, res) => {
-    // Buscamos un servidor pendiente de forma ultra simple
-    const { data, error } = await supabase
-        .from('servidores')
-        .select('job_id')
-        .eq('estado', 'pendiente')
-        .limit(1);
+// 🛡️ MEMORIA ANTI-DUPLICADOS (Guarda los IDs ya enviados a Discord)
+const processedJobs = new Set();
 
-    if (error) {
-        console.error("Error DB:", error.message);
-        return res.status(500).json({ job_id: null });
-    }
+function parseGenValue(text) {
+    if (!text) return 0;
+    const clean = text.toUpperCase().replace(/\s/g, '');
+    const num = parseFloat(clean.match(/\d+\.?\d*/) || 0);
+    if (clean.includes('B')) return num * 1000;
+    return num;
+}
 
-    if (data && data.length > 0) {
-        const targetId = data[0].job_id;
-        // Lo marcamos como 'completado' para que el próximo bot no lo use
-        await supabase.from('servidores').update({ estado: 'completado' }).eq('job_id', targetId);
-        return res.status(200).json({ job_id: targetId });
-    } else {
-        return res.status(200).json({ job_id: null });
-    }
-});
+function getWebhookByVPS(vpsName) {
+    const num = parseInt(vpsName.replace(/\D/g, '') || 0);
+    if (num >= 1 && num <= 3) return process.env.WEBHOOK_1;
+    if (num >= 4 && num <= 6) return process.env.WEBHOOK_2;
+    if (num >= 7 && num <= 9) return process.env.WEBHOOK_3;
+    if (num >= 10 && num <= 12) return process.env.WEBHOOK_4;
+    if (num >= 13 && num <= 15) return process.env.WEBHOOK_5;
+    if (num >= 16) return process.env.WEBHOOK_6;
+    return process.env.WEBHOOK_1;
+}
 
-// --- 📝 REPORTAR HALLAZGOS ---
 app.post('/add-server', async (req, res) => {
     const { jobId, brainrots, vps_name } = req.body;
-    if (!brainrots || brainrots.length === 0) return res.json({ status: "ok" });
 
-    // Guardar en Supabase
-    await supabase.from('hallazgos').insert(brainrots.map(p => ({
-        pet_name: p.name, valor_gen: p.gen, mutacion: p.mutation || "None", job_id: jobId, vps_name: vps_name
-    })));
-
-    // Enrutador de Discord
-    const vpsNum = parseInt(vps_name.replace(/\D/g, '') || 0);
-    let webhook = process.env.WEBHOOK_1;
-    if (vpsNum >= 4 && vpsNum <= 6) webhook = process.env.WEBHOOK_2;
-    if (vpsNum >= 7 && vpsNum <= 9) webhook = process.env.WEBHOOK_3;
-    if (vpsNum >= 10 && vpsNum <= 12) webhook = process.env.WEBHOOK_4;
-    if (vpsNum >= 13 && vpsNum <= 15) webhook = process.env.WEBHOOK_5;
-    if (vpsNum >= 16) webhook = process.env.WEBHOOK_6;
-
-    // Solo enviamos a Discord si es valioso (Filtro 30M)
-    const highValue = brainrots.filter(p => {
-        const v = parseFloat(p.gen.match(/\d+\.?\d*/) || 0);
-        return p.gen.includes('B') ? v * 1000 >= 30 : v >= 30;
-    });
-
-    if (highValue.length > 0 && webhook) {
-        let desc = "";
-        highValue.forEach(p => { desc += `💎 **${p.name}** [${p.gen}]\n`; });
-        axios.post(webhook, {
-            embeds: [{
-                title: `🚨 HALLAZGO EN ${vps_name}`,
-                description: desc + `\n🎮 **ID:** \`${jobId}\``,
-                color: 5793266,
-                timestamp: new Date()
-            }]
-        }).catch(() => {});
+    // 🛡️ FILTRO ANTI-CHOQUE: Si este servidor ya se reportó, ignoramos el segundo mensaje
+    if (processedJobs.has(jobId)) {
+        console.log(`🚫 Bloqueado reporte duplicado del server: ${jobId}`);
+        return res.json({ status: "already_processed" });
     }
+
+    if (brainrots && brainrots.length > 0) {
+        // Guardar en Supabase
+        await supabase.from('hallazgos').insert(brainrots.map(p => ({
+            pet_name: p.name, valor_gen: p.gen, mutacion: p.mutation || "None", job_id: jobId, vps_name: vps_name
+        })));
+
+        const highValue = brainrots.filter(p => parseGenValue(p.gen) >= 30);
+
+        if (highValue.length > 0) {
+            const target = getWebhookByVPS(vps_name);
+            if (target) {
+                // Marcamos como procesado ANTES de enviar a Discord
+                processedJobs.add(jobId);
+                
+                // Limpiamos el ID de la memoria después de 5 minutos para que pueda volver a ser escaneado en el futuro
+                setTimeout(() => processedJobs.delete(jobId), 300000);
+
+                let desc = "";
+                highValue.forEach(p => { desc += `💎 **${p.name}** [${p.gen}]\n`; });
+
+                axios.post(target, {
+                    embeds: [{
+                        title: `🚨 HALLAZGO EN ${vps_name}`,
+                        description: desc + `\n🎮 **ID:** \`${jobId}\``,
+                        color: 5793266,
+                        timestamp: new Date()
+                    }]
+                }).catch(() => {});
+            }
+        }
+    }
+    
+    await supabase.from('servidores').update({ estado: 'completado' }).eq('job_id', jobId);
     res.json({ status: "ok" });
+});
+
+// --- ASIGNAR SERVIDOR CON SKIP LOCKED ---
+app.get('/get-server', async (req, res) => {
+    // Usamos la función RPC que es más segura contra choques
+    const { data, error } = await supabase.rpc('entregar_servidor_v2');
+
+    if (data && data.length > 0) {
+        res.json({ job_id: data[0].id_servidor });
+    } else {
+        res.json({ job_id: null });
+    }
 });
 
 app.post('/add-servers-bulk', async (req, res) => {
@@ -84,4 +98,4 @@ app.get('/status', async (req, res) => {
     res.json({ servidores_pendientes: count });
 });
 
-app.listen(process.env.PORT || 8080, () => console.log("Cerebro listo"));
+app.listen(process.env.PORT || 8080);
