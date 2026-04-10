@@ -7,8 +7,6 @@ const app = express();
 app.use(bodyParser.json());
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-
-// 🛡️ MEMORIA ANTI-DUPLICADOS (Guarda los IDs ya enviados a Discord)
 const processedJobs = new Set();
 
 function parseGenValue(text) {
@@ -31,13 +29,9 @@ function getWebhookByVPS(vpsName) {
 }
 
 app.post('/add-server', async (req, res) => {
-    const { jobId, brainrots, vps_name } = req.body;
+    const { jobId, brainrots, vps_name, players } = req.body;
 
-    // 🛡️ FILTRO ANTI-CHOQUE: Si este servidor ya se reportó, ignoramos el segundo mensaje
-    if (processedJobs.has(jobId)) {
-        console.log(`🚫 Bloqueado reporte duplicado del server: ${jobId}`);
-        return res.json({ status: "already_processed" });
-    }
+    if (processedJobs.has(jobId)) return res.json({ status: "skipped" });
 
     if (brainrots && brainrots.length > 0) {
         // Guardar en Supabase
@@ -50,23 +44,35 @@ app.post('/add-server', async (req, res) => {
         if (highValue.length > 0) {
             const target = getWebhookByVPS(vps_name);
             if (target) {
-                // Marcamos como procesado ANTES de enviar a Discord
                 processedJobs.add(jobId);
-                
-                // Limpiamos el ID de la memoria después de 5 minutos para que pueda volver a ser escaneado en el futuro
                 setTimeout(() => processedJobs.delete(jobId), 300000);
 
-                let desc = "";
-                highValue.forEach(p => { desc += `💎 **${p.name}** [${p.gen}]\n`; });
+                // --- 🎨 DISEÑO TIPO IMAGEN 2 ---
+                let petList = "";
+                highValue.forEach(p => {
+                    petList += `💎 **${p.name}** ${p.gen}\n`;
+                });
 
-                axios.post(target, {
+                const joinerUrl = `https://plsbrainrot.me/joiner?placeId=109983668079237&gameInstanceId=${jobId}`;
+                const joinScript = `game:GetService("TeleportService"):TeleportToPlaceInstance(109983668079237, "${jobId}", game.Players.LocalPlayer)`;
+
+                const payload = {
                     embeds: [{
-                        title: `🚨 HALLAZGO EN ${vps_name}`,
-                        description: desc + `\n🎮 **ID:** \`${jobId}\``,
-                        color: 5793266,
+                        author: { name: 'Brainrot Notify | MidJourney' },
+                        title: `🔎 PET DETECTED (${highValue.length} Found)`,
+                        description: `**DETECTED PETS**\n\n${petList}\n` +
+                                     `🆔 **Job ID (PC)**\n\`${jobId}\`\n\n` +
+                                     `🆔 **Job ID (Mobile)**\n\`${jobId}\`\n\n` +
+                                     `🎮 **Players Online**\n${players || 1}/8\n\n` +
+                                     `🤖 **Bot**\n${vps_name}\n\n` +
+                                     `🔗 **Quick Join**\n[Click to Join](${joinerUrl})\n\n` +
+                                     `📜 **Join Script**\n\`\`\`lua\n${joinScript}\n\`\`\``,
+                        color: 5793266, // Color morado/azul de la imagen
                         timestamp: new Date()
                     }]
-                }).catch(() => {});
+                };
+
+                axios.post(target, payload).catch(e => console.log("Error DC"));
             }
         }
     }
@@ -75,16 +81,10 @@ app.post('/add-server', async (req, res) => {
     res.json({ status: "ok" });
 });
 
-// --- ASIGNAR SERVIDOR CON SKIP LOCKED ---
 app.get('/get-server', async (req, res) => {
-    // Usamos la función RPC que es más segura contra choques
-    const { data, error } = await supabase.rpc('entregar_servidor_v2');
-
-    if (data && data.length > 0) {
-        res.json({ job_id: data[0].id_servidor });
-    } else {
-        res.json({ job_id: null });
-    }
+    const { data } = await supabase.rpc('entregar_servidor_v2');
+    if (data && data.length > 0) res.json({ job_id: data[0].id_servidor });
+    else res.json({ job_id: null });
 });
 
 app.post('/add-servers-bulk', async (req, res) => {
