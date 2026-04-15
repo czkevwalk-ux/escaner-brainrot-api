@@ -6,10 +6,13 @@ const axios = require('axios');
 const app = express();
 app.use(bodyParser.json());
 
+// 🔌 CONEXIÓN CON SUPABASE
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+// 🧠 CACHÉ PARA EVITAR DUPLICADOS EN DISCORD (5 MINUTOS)
 const processedJobs = new Set();
 
-// 🛠️ UTILIDAD: CONVERTIR VALORES (Ej: 1B -> 1000M)
+// 🛠️ UTILIDAD: CONVERTIR VALORES (Ej: 1B -> 1000M) PARA FILTRADO
 function parseGenValue(text) {
     if (!text) return 0;
     const clean = text.toUpperCase().replace(/\s/g, '');
@@ -18,7 +21,7 @@ function parseGenValue(text) {
     return num;
 }
 
-// 🎯 ENRUTADOR: 3 VPS POR CANAL
+// 🎯 ENRUTADOR: 3 VPS POR CANAL (Soporta hasta 20 VPS)
 function getWebhookByVPS(vpsName) {
     const num = parseInt(vpsName.replace(/\D/g, '') || 0);
     if (num >= 1 && num <= 3) return process.env.WEBHOOK_1;
@@ -27,21 +30,29 @@ function getWebhookByVPS(vpsName) {
     if (num >= 10 && num <= 12) return process.env.WEBHOOK_4;
     if (num >= 13 && num <= 15) return process.env.WEBHOOK_5;
     if (num >= 16) return process.env.WEBHOOK_6;
-    return process.env.WEBHOOK_1;
+    return process.env.WEBHOOK_1; // Por defecto al 1
 }
 
+// =====================================================
+// 📥 RUTA: RECIBIR HALLAZGO DESDE LOS BOTS
+// =====================================================
 app.post('/add-server', async (req, res) => {
     const { jobId, brainrots, vps_name, players } = req.body;
 
+    // Si ya avisamos de este servidor hace poco, lo ignoramos para no spamear
     if (processedJobs.has(jobId)) return res.json({ status: "skipped" });
 
     if (brainrots && brainrots.length > 0) {
-        // 1. Guardar Historial en Supabase
+        // 1. Guardar en el historial de Supabase
         await supabase.from('hallazgos').insert(brainrots.map(p => ({
-            pet_name: p.name, valor_gen: p.gen, mutacion: p.mutation || "None", job_id: jobId, vps_name: vps_name
+            pet_name: p.name, 
+            valor_gen: p.gen, 
+            mutacion: p.mutation || "None", 
+            job_id: jobId, 
+            vps_name: vps_name
         })));
 
-        // 2. Filtrar calidad (+30M) para Discord
+        // 2. Filtrar calidad (+30M) para enviar a Discord
         const highValue = brainrots.filter(p => parseGenValue(p.gen) >= 30);
 
         if (highValue.length > 0) {
@@ -50,10 +61,11 @@ app.post('/add-server', async (req, res) => {
                 processedJobs.add(jobId);
                 setTimeout(() => processedJobs.delete(jobId), 300000); // 5 min anti-spam
 
-                // 🎨 CONSTRUIR LISTA DE ANIMALES (ESTILO IMAGEN 2)
+                // 🎨 CONSTRUIR EL DISEÑO EXACTO DE TU IMAGEN
                 let petList = "";
                 highValue.forEach(p => {
-                    petList += `💎 **${p.name}** ${p.gen}\n`;
+                    const mutationText = (p.mutation && p.mutation !== "None") ? ` (${p.mutation})` : "";
+                    petList += `💎 **${p.name}${mutationText}** ${p.gen}\n`;
                     if (p.inDuel) {
                         petList += `⚠️ **EN DUELO**\n`;
                     }
@@ -78,31 +90,72 @@ app.post('/add-server', async (req, res) => {
                     }]
                 };
 
-                axios.post(target, payload).catch(e => console.log("Error Discord"));
+                axios.post(target, payload).catch(e => console.log("Error enviando a Discord"));
             }
         }
     }
     
+    // Marcar este servidor como "completado" en la lista de escaneo
     await supabase.from('servidores').update({ estado: 'completado' }).eq('job_id', jobId);
     res.json({ status: "ok" });
 });
 
-// ASIGNACIÓN ALEATORIA V3
+// =====================================================
+// 📤 RUTA: ENTREGAR SERVIDOR ÚNICO A UN BOT (GET-SERVER)
+// =====================================================
 app.get('/get-server', async (req, res) => {
-    const { data } = await supabase.rpc('entregar_servidor_v3');
-    if (data && data.length > 0) res.json({ job_id: data[0].id_servidor });
-    else res.json({ job_id: null });
+    try {
+        const { data, error } = await supabase.rpc('entregar_servidor_v3');
+        if (error) throw error;
+
+        if (data && data.length > 0) {
+            res.json({ job_id: data[0].id_servidor });
+        } else {
+            res.json({ job_id: null });
+        }
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
+// =====================================================
+// ⚡ RUTA: INYECTAR SERVIDORES DESDE EL ESCÁNER (GO/PY)
+// =====================================================
 app.post('/add-servers-bulk', async (req, res) => {
     const { job_ids } = req.body;
-    await supabase.from('servidores').upsert(job_ids.map(id => ({ job_id: id, estado: 'pendiente' })), { onConflict: 'job_id' });
-    res.json({ status: "ok" });
+    if (!job_ids || job_ids.length === 0) return res.json({ status: "empty" });
+
+    // Insertar masivamente ignorando duplicados
+    const { error } = await supabase
+        .from('servidores')
+        .upsert(
+            job_ids.map(id => ({ job_id: id, estado: 'pendiente' })), 
+            { onConflict: 'job_id' }
+        );
+
+    if (error) return res.status(500).json(error);
+    res.json({ status: "ok", added: job_ids.length });
 });
 
+// =====================================================
+// 📊 RUTA: VER ESTADO DE LA COLA
+// =====================================================
 app.get('/status', async (req, res) => {
-    const { count } = await supabase.from('servidores').select('*', { count: 'exact', head: true }).eq('estado', 'pendiente');
+    const { count, error } = await supabase
+        .from('servidores')
+        .select('*', { count: 'exact', head: true })
+        .eq('estado', 'pendiente');
+
+    if (error) return res.status(500).json(error);
     res.json({ servidores_pendientes: count });
 });
 
-app.listen(process.env.PORT || 8080);
+// Página de inicio para evitar el "Cannot GET /"
+app.get('/', (req, res) => {
+    res.send('🛰️ Sistema de Escaneo Industrial Activo');
+});
+
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+    console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+});
