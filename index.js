@@ -39,33 +39,33 @@ function getWebhookByVPS(vpsName) {
 app.post('/add-server', async (req, res) => {
     const { jobId, brainrots, vps_name, players } = req.body;
 
-    // Si ya avisamos de este servidor hace poco, lo ignoramos para no spamear
     if (processedJobs.has(jobId)) return res.json({ status: "skipped" });
 
     if (brainrots && brainrots.length > 0) {
-        // 1. Guardar en el historial de Supabase
+        // 1. Guardar en el historial de Supabase 
+        // USAMOS (p.gen || p.value) PARA ARREGLAR EL ERROR DEL NULL
         await supabase.from('hallazgos').insert(brainrots.map(p => ({
             pet_name: p.name, 
-            valor_gen: p.gen, 
+            valor_gen: p.gen || p.value, 
             mutacion: p.mutation || "None", 
             job_id: jobId, 
             vps_name: vps_name
         })));
 
-        // 2. Filtrar calidad (+30M) para enviar a Discord
-        const highValue = brainrots.filter(p => parseGenValue(p.gen) >= 30);
+        // 2. Filtrar calidad (+30M) - TAMBIÉN CORREGIDO AQUÍ
+        const highValue = brainrots.filter(p => parseGenValue(p.gen || p.value) >= 30);
 
         if (highValue.length > 0) {
             const target = getWebhookByVPS(vps_name);
             if (target) {
                 processedJobs.add(jobId);
-                setTimeout(() => processedJobs.delete(jobId), 300000); // 5 min anti-spam
+                setTimeout(() => processedJobs.delete(jobId), 300000); 
 
-                // 🎨 CONSTRUIR EL DISEÑO EXACTO DE TU IMAGEN
                 let petList = "";
                 highValue.forEach(p => {
+                    const price = p.gen || p.value; // El valor que viene del bot
                     const mutationText = (p.mutation && p.mutation !== "None") ? ` (${p.mutation})` : "";
-                    petList += `💎 **${p.name}${mutationText}** ${p.gen}\n`;
+                    petList += `💎 **${p.name}${mutationText}** ${price}\n`;
                     if (p.inDuel) {
                         petList += `⚠️ **EN DUELO**\n`;
                     }
@@ -90,24 +90,22 @@ app.post('/add-server', async (req, res) => {
                     }]
                 };
 
-                axios.post(target, payload).catch(e => console.log("Error enviando a Discord"));
+                axios.post(target, payload).catch(e => console.log("Error Discord"));
             }
         }
     }
     
-    // Marcar este servidor como "completado" en la lista de escaneo
     await supabase.from('servidores').update({ estado: 'completado' }).eq('job_id', jobId);
     res.json({ status: "ok" });
 });
 
 // =====================================================
-// 📤 RUTA: ENTREGAR SERVIDOR ÚNICO A UN BOT (GET-SERVER)
+// 📤 RUTA: ENTREGAR SERVIDOR ÚNICO (GET-SERVER)
 // =====================================================
 app.get('/get-server', async (req, res) => {
     try {
         const { data, error } = await supabase.rpc('entregar_servidor_v3');
         if (error) throw error;
-
         if (data && data.length > 0) {
             res.json({ job_id: data[0].id_servidor });
         } else {
@@ -119,13 +117,12 @@ app.get('/get-server', async (req, res) => {
 });
 
 // =====================================================
-// ⚡ RUTA: INYECTAR SERVIDORES DESDE EL ESCÁNER (GO/PY)
+// ⚡ RUTA: INYECTAR SERVIDORES (ADD-BULK)
 // =====================================================
 app.post('/add-servers-bulk', async (req, res) => {
     const { job_ids } = req.body;
     if (!job_ids || job_ids.length === 0) return res.json({ status: "empty" });
 
-    // Insertar masivamente ignorando duplicados
     const { error } = await supabase
         .from('servidores')
         .upsert(
@@ -150,7 +147,6 @@ app.get('/status', async (req, res) => {
     res.json({ servidores_pendientes: count });
 });
 
-// Página de inicio para evitar el "Cannot GET /"
 app.get('/', (req, res) => {
     res.send('🛰️ Sistema de Escaneo Industrial Activo');
 });
