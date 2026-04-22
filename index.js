@@ -30,7 +30,7 @@ function getWebhookByVPS(vpsName) {
     if (num >= 10 && num <= 12) return process.env.WEBHOOK_4;
     if (num >= 13 && num <= 15) return process.env.WEBHOOK_5;
     if (num >= 16) return process.env.WEBHOOK_6;
-    return process.env.WEBHOOK_1; // Por defecto al 1
+    return process.env.WEBHOOK_1;
 }
 
 // =====================================================
@@ -42,28 +42,29 @@ app.post('/add-server', async (req, res) => {
     if (processedJobs.has(jobId)) return res.json({ status: "skipped" });
 
     if (brainrots && brainrots.length > 0) {
-        // 1. Guardar en el historial de Supabase 
-        // USAMOS (p.gen || p.value) PARA ARREGLAR EL ERROR DEL NULL
-        await supabase.from('hallazgos').insert(brainrots.map(p => ({
-            pet_name: p.name, 
-            valor_gen: p.gen || p.value, 
-            mutacion: p.mutation || "None", 
-            job_id: jobId, 
+        // 1. Guardar en Supabase — 1 SOLA FILA por servidor con todos los brainrots
+        const petNames = brainrots.map(p => p.name).join(', ');
+        const topPet = brainrots[0]; // El de mayor valor (ya vienen ordenados)
+        await supabase.from('hallazgos').insert({
+            pet_name: petNames,
+            valor_gen: topPet.gen || topPet.value,
+            mutacion: topPet.mutation || "None",
+            job_id: jobId,
             vps_name: vps_name
-        })));
+        });
 
-        // 2. Filtrar calidad (+30M) - TAMBIÉN CORREGIDO AQUÍ
+        // 2. Filtrar calidad (+30M) para Discord
         const highValue = brainrots.filter(p => parseGenValue(p.gen || p.value) >= 30);
 
         if (highValue.length > 0) {
             const target = getWebhookByVPS(vps_name);
             if (target) {
                 processedJobs.add(jobId);
-                setTimeout(() => processedJobs.delete(jobId), 300000); 
+                setTimeout(() => processedJobs.delete(jobId), 300000);
 
                 let petList = "";
                 highValue.forEach(p => {
-                    const price = p.gen || p.value; // El valor que viene del bot
+                    const price = p.gen || p.value;
                     const mutationText = (p.mutation && p.mutation !== "None") ? ` (${p.mutation})` : "";
                     petList += `💎 **${p.name}${mutationText}** ${price}\n`;
                     if (p.inDuel) {
@@ -94,7 +95,7 @@ app.post('/add-server', async (req, res) => {
             }
         }
     }
-    
+
     await supabase.from('servidores').update({ estado: 'completado' }).eq('job_id', jobId);
     res.json({ status: "ok" });
 });
@@ -126,7 +127,7 @@ app.post('/add-servers-bulk', async (req, res) => {
     const { error } = await supabase
         .from('servidores')
         .upsert(
-            job_ids.map(id => ({ job_id: id, estado: 'pendiente' })), 
+            job_ids.map(id => ({ job_id: id, estado: 'pendiente' })),
             { onConflict: 'job_id' }
         );
 
