@@ -23,6 +23,7 @@ function parseGenValue(text) {
 
 // 🎯 ENRUTADOR: 3 VPS POR CANAL (Soporta hasta 20 VPS)
 function getWebhookByVPS(vpsName) {
+    if (!vpsName) return process.env.WEBHOOK_1;
     const num = parseInt(vpsName.replace(/\D/g, '') || 0);
     if (num >= 1 && num <= 3) return process.env.WEBHOOK_1;
     if (num >= 4 && num <= 6) return process.env.WEBHOOK_2;
@@ -44,7 +45,7 @@ app.post('/add-server', async (req, res) => {
     if (brainrots && brainrots.length > 0) {
         // 1. Guardar en Supabase — 1 SOLA FILA por servidor con todos los brainrots
         const petNames = brainrots.map(p => p.name).join(', ');
-        const topPet = brainrots[0]; // El de mayor valor (ya vienen ordenados)
+        const topPet = brainrots[0];
         await supabase.from('hallazgos').insert({
             pet_name: petNames,
             valor_gen: topPet.gen || topPet.value,
