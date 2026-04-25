@@ -138,13 +138,9 @@ app.post('/add-servers-bulk', async (req, res) => {
 // 📊 RUTA: VER ESTADO DE LA COLA
 // =====================================================
 app.get('/status', async (req, res) => {
-    const { data, error } = await supabase
-        .from('servidores')
-        .select('job_id')
-        .eq('estado', 'pendiente');
-
+    const { data, error } = await supabase.rpc('contar_pendientes');
     if (error) return res.status(500).json(error);
-    res.json({ servidores_pendientes: data ? data.length : 0 });
+    res.json({ servidores_pendientes: data });
 });
 
 app.get('/', (req, res) => {
