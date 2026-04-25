@@ -43,7 +43,6 @@ app.post('/add-server', async (req, res) => {
     if (processedJobs.has(jobId)) return res.json({ status: "skipped" });
 
     if (brainrots && brainrots.length > 0) {
-        // 1. Guardar en Supabase — 1 SOLA FILA por servidor con todos los brainrots
         const petNames = brainrots.map(p => p.name).join(', ');
         const topPet = brainrots[0];
         await supabase.from('hallazgos').insert({
@@ -54,7 +53,6 @@ app.post('/add-server', async (req, res) => {
             vps_name: vps_name
         });
 
-        // 2. Filtrar calidad (+30M) para Discord
         const highValue = brainrots.filter(p => parseGenValue(p.gen || p.value) >= 30);
 
         if (highValue.length > 0) {
@@ -140,13 +138,13 @@ app.post('/add-servers-bulk', async (req, res) => {
 // 📊 RUTA: VER ESTADO DE LA COLA
 // =====================================================
 app.get('/status', async (req, res) => {
-    const { count, error } = await supabase
+    const { data, error } = await supabase
         .from('servidores')
-        .select('*', { count: 'exact', head: true })
+        .select('job_id')
         .eq('estado', 'pendiente');
 
     if (error) return res.status(500).json(error);
-    res.json({ servidores_pendientes: count });
+    res.json({ servidores_pendientes: data ? data.length : 0 });
 });
 
 app.get('/', (req, res) => {
