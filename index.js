@@ -35,65 +35,6 @@ function getWebhookByVPS(vpsName) {
 }
 
 // =====================================================
-// 🔄 LÓGICA DE RECICLAJE
-// =====================================================
-let reciclando = false;
-
-async function manejarReciclaje() {
-    // Evitar que múltiples requests reciclen al mismo tiempo
-    if (reciclando) return;
-    reciclando = true;
-
-    try {
-        const { count: pendientes } = await supabase
-            .from('servidores')
-            .select('*', { count: 'exact', head: true })
-            .eq('estado', 'pendiente');
-
-        const { count: frescos } = await supabase
-            .from('servidores')
-            .select('*', { count: 'exact', head: true })
-            .eq('estado', 'pendiente_nuevo');
-
-        // Si hay 10k+ nuevos → borrar todo lo viejo → activar nuevos
-        if (frescos >= 10000) {
-            await supabase.from('servidores').delete().eq('estado', 'usado');
-            await supabase.from('servidores').delete().eq('estado', 'reciclado');
-            await supabase
-                .from('servidores')
-                .update({ estado: 'pendiente' })
-                .eq('estado', 'pendiente_nuevo');
-
-            console.log('🧹 Ciclo nuevo activado. Servidores viejos borrados.');
-            return;
-        }
-
-        // Si quedan menos de 500 pendientes → reciclar TODOS los usados de golpe
-        if (pendientes < 500) {
-            const { count: usados } = await supabase
-                .from('servidores')
-                .select('*', { count: 'exact', head: true })
-                .eq('estado', 'usado');
-
-            if (usados > 0) {
-                const { error } = await supabase
-                    .from('servidores')
-                    .update({ estado: 'pendiente' })
-                    .eq('estado', 'usado');
-
-                if (!error) {
-                    console.log(`♻️ Reciclados ${usados} servidores de golpe → pendiente. Frescos nuevos en espera: ${frescos}`);
-                } else {
-                    console.log('❌ Error reciclando:', error.message);
-                }
-            }
-        }
-    } finally {
-        reciclando = false;
-    }
-}
-
-// =====================================================
 // 📥 RUTA: RECIBIR HALLAZGO DESDE LOS BOTS
 // =====================================================
 app.post('/add-server', async (req, res) => {
@@ -154,12 +95,7 @@ app.post('/add-server', async (req, res) => {
         }
     }
 
-    // ✅ Marca como usado (no borra)
-    await supabase.from('servidores').update({ estado: 'usado' }).eq('job_id', jobId);
-
-    // 🔄 Revisa si hay que reciclar
-    await manejarReciclaje();
-
+    await supabase.from('servidores').update({ estado: 'completado' }).eq('job_id', jobId);
     res.json({ status: "ok" });
 });
 
@@ -168,9 +104,6 @@ app.post('/add-server', async (req, res) => {
 // =====================================================
 app.get('/get-server', async (req, res) => {
     try {
-        // 🔄 Revisa reciclaje antes de entregar
-        await manejarReciclaje();
-
         const { data, error } = await supabase.rpc('entregar_servidor_v3');
         if (error) throw error;
         if (data && data.length > 0) {
@@ -184,26 +117,16 @@ app.get('/get-server', async (req, res) => {
 });
 
 // =====================================================
-// ⚡ RUTA: INYECTAR SERVIDORES NUEVOS (ADD-BULK)
-// Nuevos entran como 'pendiente_nuevo' para no mezclarse
-// con el ciclo actual que está corriendo
+// ⚡ RUTA: INYECTAR SERVIDORES (ADD-BULK)
 // =====================================================
 app.post('/add-servers-bulk', async (req, res) => {
     const { job_ids } = req.body;
     if (!job_ids || job_ids.length === 0) return res.json({ status: "empty" });
 
-    const { count: pendientes } = await supabase
-        .from('servidores')
-        .select('*', { count: 'exact', head: true })
-        .eq('estado', 'pendiente');
-
-    // Si no hay nada activo entran directo, si hay activos esperan su turno
-    const estadoEntrada = pendientes === 0 ? 'pendiente' : 'pendiente_nuevo';
-
     const { error } = await supabase
         .from('servidores')
         .upsert(
-            job_ids.map(id => ({ job_id: id, estado: estadoEntrada })),
+            job_ids.map(id => ({ job_id: id, estado: 'pendiente' })),
             { onConflict: 'job_id' }
         );
 
