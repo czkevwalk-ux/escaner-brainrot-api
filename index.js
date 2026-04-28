@@ -37,45 +37,59 @@ function getWebhookByVPS(vpsName) {
 // =====================================================
 // 🔄 LÓGICA DE RECICLAJE
 // =====================================================
+let reciclando = false;
+
 async function manejarReciclaje() {
-    const { count: pendientes } = await supabase
-        .from('servidores')
-        .select('*', { count: 'exact', head: true })
-        .eq('estado', 'pendiente');
+    // Evitar que múltiples requests reciclen al mismo tiempo
+    if (reciclando) return;
+    reciclando = true;
 
-    const { count: frescos } = await supabase
-        .from('servidores')
-        .select('*', { count: 'exact', head: true })
-        .eq('estado', 'pendiente_nuevo');
-
-    // Si hay 10k+ nuevos → borrar todo lo viejo → activar nuevos
-    if (frescos >= 10000) {
-        await supabase.from('servidores').delete().eq('estado', 'reciclado');
-        await supabase.from('servidores').delete().eq('estado', 'usado');
-        await supabase
-            .from('servidores')
-            .update({ estado: 'pendiente' })
-            .eq('estado', 'pendiente_nuevo');
-
-        console.log('🧹 Ciclo nuevo activado. Servidores viejos borrados.');
-        return;
-    }
-
-    // Si quedan menos de 500 pendientes → reciclar ya sin esperar 0
-    if (pendientes < 500) {
-        const { count: usados } = await supabase
+    try {
+        const { count: pendientes } = await supabase
             .from('servidores')
             .select('*', { count: 'exact', head: true })
-            .eq('estado', 'usado');
+            .eq('estado', 'pendiente');
 
-        if (usados > 0) {
+        const { count: frescos } = await supabase
+            .from('servidores')
+            .select('*', { count: 'exact', head: true })
+            .eq('estado', 'pendiente_nuevo');
+
+        // Si hay 10k+ nuevos → borrar todo lo viejo → activar nuevos
+        if (frescos >= 10000) {
+            await supabase.from('servidores').delete().eq('estado', 'usado');
+            await supabase.from('servidores').delete().eq('estado', 'reciclado');
             await supabase
                 .from('servidores')
                 .update({ estado: 'pendiente' })
+                .eq('estado', 'pendiente_nuevo');
+
+            console.log('🧹 Ciclo nuevo activado. Servidores viejos borrados.');
+            return;
+        }
+
+        // Si quedan menos de 500 pendientes → reciclar TODOS los usados de golpe
+        if (pendientes < 500) {
+            const { count: usados } = await supabase
+                .from('servidores')
+                .select('*', { count: 'exact', head: true })
                 .eq('estado', 'usado');
 
-            console.log(`♻️ Reciclados ${usados} servidores usados → pendiente. Frescos nuevos en espera: ${frescos}`);
+            if (usados > 0) {
+                const { error } = await supabase
+                    .from('servidores')
+                    .update({ estado: 'pendiente' })
+                    .eq('estado', 'usado');
+
+                if (!error) {
+                    console.log(`♻️ Reciclados ${usados} servidores de golpe → pendiente. Frescos nuevos en espera: ${frescos}`);
+                } else {
+                    console.log('❌ Error reciclando:', error.message);
+                }
+            }
         }
+    } finally {
+        reciclando = false;
     }
 }
 
