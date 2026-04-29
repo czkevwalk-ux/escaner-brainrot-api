@@ -42,7 +42,7 @@ async function manejarReciclaje() {
         const { count: pendientes } = await supabase
             .from('servidores')
             .select('*', { count: 'exact', head: true })
-            .eq('estado', 'pendiente');
+            .in('estado', ['pendiente', 'pendiente_nuevo']);
 
         const umbral = (pendientes === 0) ? 999999 : 9000;
 
@@ -50,13 +50,13 @@ async function manejarReciclaje() {
             const { count: total } = await supabase
                 .from('servidores')
                 .select('*', { count: 'exact', head: true })
-                .in('estado', ['usado', 'entregado', 'completado', 'pendiente_nuevo']);
+                .in('estado', ['usado', 'entregado', 'completado']);
 
             if (total > 0) {
                 await supabase
                     .from('servidores')
                     .update({ estado: 'pendiente' })
-                    .in('estado', ['usado', 'entregado', 'completado', 'pendiente_nuevo']);
+                    .in('estado', ['usado', 'entregado', 'completado']);
 
                 console.log(`♻️ Reciclados ${total} servidores → pendiente (pendientes antes: ${pendientes})`);
             }
@@ -156,8 +156,8 @@ app.get('/get-server', async (req, res) => {
 
 // =====================================================
 // ⚡ RUTA: INYECTAR SERVIDORES NUEVOS (ADD-BULK)
-// Solo borra antiguos cuando ya hay más de 10k
-// Antes de 10k solo acumula
+// Entran como 'pendiente_nuevo' para tener prioridad
+// Solo borra antiguos cuando ya hay más de 15k
 // =====================================================
 app.post('/add-servers-bulk', async (req, res) => {
     const { job_ids } = req.body;
@@ -165,22 +165,22 @@ app.post('/add-servers-bulk', async (req, res) => {
 
     const cantidad = job_ids.length;
 
-    // Insertar nuevos como pendiente
+    // ✅ Entran como pendiente_nuevo → tienen prioridad sobre el stock
     const { error } = await supabase
         .from('servidores')
         .upsert(
-            job_ids.map(id => ({ job_id: id, estado: 'pendiente' })),
+            job_ids.map(id => ({ job_id: id, estado: 'pendiente_nuevo' })),
             { onConflict: 'job_id' }
         );
 
     if (error) return res.status(500).json(error);
 
-    // ✅ FIX: Solo borrar antiguos si ya hay más de 10k
+    // ✅ Solo borrar antiguos si ya hay más de 15k
     const { count: totalActual } = await supabase
         .from('servidores')
         .select('*', { count: 'exact', head: true });
 
-    if (totalActual > 10000) {
+    if (totalActual > 15000) {
         const { data: antiguos } = await supabase
             .from('servidores')
             .select('job_id')
