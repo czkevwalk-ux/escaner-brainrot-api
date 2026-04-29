@@ -50,16 +50,34 @@ async function manejarReciclaje() {
             const { count: total } = await supabase
                 .from('servidores')
                 .select('*', { count: 'exact', head: true })
-                .in('estado', ['usado', 'entregado', 'completado']);
+                .in('estado', ['usado', 'completado']);
 
             if (total > 0) {
                 await supabase
                     .from('servidores')
                     .update({ estado: 'pendiente' })
-                    .in('estado', ['usado', 'entregado', 'completado']);
+                    .in('estado', ['usado', 'completado']);
 
-                console.log(`♻️ Reciclados ${total} servidores → pendiente (pendientes antes: ${pendientes})`);
+                console.log(`♻️ Reciclados ${total} servidores → pendiente`);
             }
+        }
+
+        // ✅ FIX: Reciclar entregados huérfanos (bots que no reportaron en 5 min)
+        const cincoMinutosAtras = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+        const { count: huerfanos } = await supabase
+            .from('servidores')
+            .select('*', { count: 'exact', head: true })
+            .eq('estado', 'entregado')
+            .lt('created_at', cincoMinutosAtras);
+
+        if (huerfanos > 0) {
+            await supabase
+                .from('servidores')
+                .update({ estado: 'pendiente' })
+                .eq('estado', 'entregado')
+                .lt('created_at', cincoMinutosAtras);
+
+            console.log(`🔄 Rescatados ${huerfanos} entregados huérfanos → pendiente`);
         }
 
     } catch (err) {
@@ -165,7 +183,6 @@ app.post('/add-servers-bulk', async (req, res) => {
 
     const cantidad = job_ids.length;
 
-    // ✅ Entran como pendiente_nuevo → tienen prioridad sobre el stock
     const { error } = await supabase
         .from('servidores')
         .upsert(
