@@ -36,37 +36,18 @@ function getWebhookByVPS(vpsName) {
 
 // =====================================================
 // 🔄 LÓGICA DE RECICLAJE (CORRE CADA 10 SEGUNDOS)
-// Independiente de las requests de los bots
 // =====================================================
 async function manejarReciclaje() {
     try {
         const [
             { count: pendientes },
-            { count: frescos },
             { count: usados },
             { count: entregados }
         ] = await Promise.all([
             supabase.from('servidores').select('*', { count: 'exact', head: true }).eq('estado', 'pendiente'),
-            supabase.from('servidores').select('*', { count: 'exact', head: true }).eq('estado', 'pendiente_nuevo'),
             supabase.from('servidores').select('*', { count: 'exact', head: true }).eq('estado', 'usado'),
             supabase.from('servidores').select('*', { count: 'exact', head: true }).eq('estado', 'entregado')
         ]);
-
-        // Si hay 10k+ nuevos → borrar todo lo viejo → activar nuevos
-        if (frescos >= 10000) {
-            await Promise.all([
-                supabase.from('servidores').delete().eq('estado', 'usado'),
-                supabase.from('servidores').delete().eq('estado', 'entregado'),
-                supabase.from('servidores').delete().eq('estado', 'reciclado')
-            ]);
-            const { error } = await supabase
-                .from('servidores')
-                .update({ estado: 'pendiente' })
-                .eq('estado', 'pendiente_nuevo');
-
-            if (!error) console.log(`🧹 Ciclo nuevo activado. ${frescos} frescos → pendiente. Viejos borrados.`);
-            return;
-        }
 
         // Si hay menos de 500 pendientes → reciclar usados Y entregados huérfanos
         if (pendientes < 500) {
@@ -76,7 +57,7 @@ async function manejarReciclaje() {
                     supabase.from('servidores').update({ estado: 'pendiente' }).eq('estado', 'usado'),
                     supabase.from('servidores').update({ estado: 'pendiente' }).eq('estado', 'entregado')
                 ]);
-                console.log(`♻️ Reciclados ${total} servidores (${usados} usados + ${entregados} huérfanos) → pendiente. Frescos nuevos: ${frescos}`);
+                console.log(`♻️ Reciclados ${total} servidores → pendiente`);
             }
         }
 
@@ -85,7 +66,7 @@ async function manejarReciclaje() {
     }
 }
 
-// ✅ CORRE CADA 10 SEGUNDOS — no depende de los bots
+// ✅ CORRE CADA 10 SEGUNDOS
 setInterval(manejarReciclaje, 10000);
 
 // =====================================================
@@ -149,7 +130,7 @@ app.post('/add-server', async (req, res) => {
         }
     }
 
-    // ✅ Marca como usado (no borra)
+    // ✅ Marca como usado
     await supabase.from('servidores').update({ estado: 'usado' }).eq('job_id', jobId);
 
     res.json({ status: "ok" });
@@ -174,29 +155,40 @@ app.get('/get-server', async (req, res) => {
 
 // =====================================================
 // ⚡ RUTA: INYECTAR SERVIDORES NUEVOS (ADD-BULK)
-// Nuevos entran como 'pendiente_nuevo' para no mezclarse
-// con el ciclo actual que está corriendo
+// Nuevos entran como pendiente_nuevo
+// Se borran los mismos N más antiguos para mantener 10k
 // =====================================================
 app.post('/add-servers-bulk', async (req, res) => {
     const { job_ids } = req.body;
     if (!job_ids || job_ids.length === 0) return res.json({ status: "empty" });
 
-    const { count: pendientes } = await supabase
-        .from('servidores')
-        .select('*', { count: 'exact', head: true })
-        .eq('estado', 'pendiente');
+    const cantidad = job_ids.length;
 
-    const estadoEntrada = pendientes === 0 ? 'pendiente' : 'pendiente_nuevo';
-
+    // Insertar nuevos como pendiente_nuevo
     const { error } = await supabase
         .from('servidores')
         .upsert(
-            job_ids.map(id => ({ job_id: id, estado: estadoEntrada })),
+            job_ids.map(id => ({ job_id: id, estado: 'pendiente_nuevo' })),
             { onConflict: 'job_id' }
         );
 
     if (error) return res.status(500).json(error);
-    res.json({ status: "ok", added: job_ids.length });
+
+    // Borrar los N más antiguos (pendiente o usado) para mantener 10k
+    const { data: antiguos } = await supabase
+        .from('servidores')
+        .select('job_id')
+        .in('estado', ['pendiente', 'usado'])
+        .order('created_at', { ascending: true })
+        .limit(cantidad);
+
+    if (antiguos && antiguos.length > 0) {
+        const idsABorrar = antiguos.map(s => s.job_id);
+        await supabase.from('servidores').delete().in('job_id', idsABorrar);
+        console.log(`🗑️ Borrados ${idsABorrar.length} servidores antiguos → reemplazados por ${cantidad} nuevos`);
+    }
+
+    res.json({ status: "ok", added: cantidad });
 });
 
 // =====================================================
