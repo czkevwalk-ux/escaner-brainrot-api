@@ -156,8 +156,8 @@ app.get('/get-server', async (req, res) => {
 
 // =====================================================
 // ⚡ RUTA: INYECTAR SERVIDORES NUEVOS (ADD-BULK)
-// Entran directo como 'pendiente'
-// Se borran los N más antiguos para mantener 10k
+// Solo borra antiguos cuando ya hay más de 10k
+// Antes de 10k solo acumula
 // =====================================================
 app.post('/add-servers-bulk', async (req, res) => {
     const { job_ids } = req.body;
@@ -165,6 +165,7 @@ app.post('/add-servers-bulk', async (req, res) => {
 
     const cantidad = job_ids.length;
 
+    // Insertar nuevos como pendiente
     const { error } = await supabase
         .from('servidores')
         .upsert(
@@ -174,18 +175,26 @@ app.post('/add-servers-bulk', async (req, res) => {
 
     if (error) return res.status(500).json(error);
 
-    // Borrar los N más antiguos para mantener 10k
-    const { data: antiguos } = await supabase
+    // ✅ FIX: Solo borrar antiguos si ya hay más de 10k
+    const { count: totalActual } = await supabase
         .from('servidores')
-        .select('job_id')
-        .in('estado', ['pendiente', 'usado'])
-        .order('created_at', { ascending: true })
-        .limit(cantidad);
+        .select('*', { count: 'exact', head: true });
 
-    if (antiguos && antiguos.length > 0) {
-        const idsABorrar = antiguos.map(s => s.job_id);
-        await supabase.from('servidores').delete().in('job_id', idsABorrar);
-        console.log(`🗑️ Borrados ${idsABorrar.length} servidores antiguos → reemplazados por ${cantidad} nuevos`);
+    if (totalActual > 10000) {
+        const { data: antiguos } = await supabase
+            .from('servidores')
+            .select('job_id')
+            .in('estado', ['pendiente', 'usado'])
+            .order('created_at', { ascending: true })
+            .limit(cantidad);
+
+        if (antiguos && antiguos.length > 0) {
+            const idsABorrar = antiguos.map(s => s.job_id);
+            await supabase.from('servidores').delete().in('job_id', idsABorrar);
+            console.log(`🗑️ Borrados ${idsABorrar.length} servidores antiguos → reemplazados por ${cantidad} nuevos`);
+        }
+    } else {
+        console.log(`📥 Acumulando... Total actual: ${totalActual + cantidad} servidores`);
     }
 
     res.json({ status: "ok", added: cantidad });
