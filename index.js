@@ -35,6 +35,60 @@ function getWebhookByVPS(vpsName) {
 }
 
 // =====================================================
+// 🔄 LÓGICA DE RECICLAJE (CORRE CADA 10 SEGUNDOS)
+// Independiente de las requests de los bots
+// =====================================================
+async function manejarReciclaje() {
+    try {
+        const [
+            { count: pendientes },
+            { count: frescos },
+            { count: usados },
+            { count: entregados }
+        ] = await Promise.all([
+            supabase.from('servidores').select('*', { count: 'exact', head: true }).eq('estado', 'pendiente'),
+            supabase.from('servidores').select('*', { count: 'exact', head: true }).eq('estado', 'pendiente_nuevo'),
+            supabase.from('servidores').select('*', { count: 'exact', head: true }).eq('estado', 'usado'),
+            supabase.from('servidores').select('*', { count: 'exact', head: true }).eq('estado', 'entregado')
+        ]);
+
+        // Si hay 10k+ nuevos → borrar todo lo viejo → activar nuevos
+        if (frescos >= 10000) {
+            await Promise.all([
+                supabase.from('servidores').delete().eq('estado', 'usado'),
+                supabase.from('servidores').delete().eq('estado', 'entregado'),
+                supabase.from('servidores').delete().eq('estado', 'reciclado')
+            ]);
+            const { error } = await supabase
+                .from('servidores')
+                .update({ estado: 'pendiente' })
+                .eq('estado', 'pendiente_nuevo');
+
+            if (!error) console.log(`🧹 Ciclo nuevo activado. ${frescos} frescos → pendiente. Viejos borrados.`);
+            return;
+        }
+
+        // Si hay menos de 500 pendientes → reciclar usados Y entregados huérfanos
+        if (pendientes < 500) {
+            const total = (usados || 0) + (entregados || 0);
+            if (total > 0) {
+                await Promise.all([
+                    supabase.from('servidores').update({ estado: 'pendiente' }).eq('estado', 'usado'),
+                    supabase.from('servidores').update({ estado: 'pendiente' }).eq('estado', 'entregado')
+                ]);
+                console.log(`♻️ Reciclados ${total} servidores (${usados} usados + ${entregados} huérfanos) → pendiente. Frescos nuevos: ${frescos}`);
+            }
+        }
+
+    } catch (err) {
+        console.log('❌ Error en manejarReciclaje:', err.message);
+    }
+}
+
+// ✅ CORRE CADA 10 SEGUNDOS — no depende de los bots
+setInterval(manejarReciclaje, 10000);
+
+// =====================================================
 // 📥 RUTA: RECIBIR HALLAZGO DESDE LOS BOTS
 // =====================================================
 app.post('/add-server', async (req, res) => {
@@ -95,7 +149,9 @@ app.post('/add-server', async (req, res) => {
         }
     }
 
-    await supabase.from('servidores').update({ estado: 'completado' }).eq('job_id', jobId);
+    // ✅ Marca como usado (no borra)
+    await supabase.from('servidores').update({ estado: 'usado' }).eq('job_id', jobId);
+
     res.json({ status: "ok" });
 });
 
@@ -117,16 +173,25 @@ app.get('/get-server', async (req, res) => {
 });
 
 // =====================================================
-// ⚡ RUTA: INYECTAR SERVIDORES (ADD-BULK)
+// ⚡ RUTA: INYECTAR SERVIDORES NUEVOS (ADD-BULK)
+// Nuevos entran como 'pendiente_nuevo' para no mezclarse
+// con el ciclo actual que está corriendo
 // =====================================================
 app.post('/add-servers-bulk', async (req, res) => {
     const { job_ids } = req.body;
     if (!job_ids || job_ids.length === 0) return res.json({ status: "empty" });
 
+    const { count: pendientes } = await supabase
+        .from('servidores')
+        .select('*', { count: 'exact', head: true })
+        .eq('estado', 'pendiente');
+
+    const estadoEntrada = pendientes === 0 ? 'pendiente' : 'pendiente_nuevo';
+
     const { error } = await supabase
         .from('servidores')
         .upsert(
-            job_ids.map(id => ({ job_id: id, estado: 'pendiente' })),
+            job_ids.map(id => ({ job_id: id, estado: estadoEntrada })),
             { onConflict: 'job_id' }
         );
 
@@ -150,4 +215,5 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
     console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+    manejarReciclaje();
 });
