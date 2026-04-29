@@ -35,29 +35,32 @@ function getWebhookByVPS(vpsName) {
 }
 
 // =====================================================
-// 🔄 LÓGICA DE RECICLAJE (CORRE CADA 10 SEGUNDOS)
+// 🔄 LÓGICA DE RECICLAJE (CORRE CADA 3 SEGUNDOS)
 // =====================================================
 async function manejarReciclaje() {
     try {
-        const [
-            { count: pendientes },
-            { count: usados },
-            { count: entregados }
-        ] = await Promise.all([
-            supabase.from('servidores').select('*', { count: 'exact', head: true }).eq('estado', 'pendiente'),
-            supabase.from('servidores').select('*', { count: 'exact', head: true }).eq('estado', 'usado'),
-            supabase.from('servidores').select('*', { count: 'exact', head: true }).eq('estado', 'entregado')
-        ]);
+        const { count: pendientes } = await supabase
+            .from('servidores')
+            .select('*', { count: 'exact', head: true })
+            .eq('estado', 'pendiente');
 
-        // Si hay menos de 500 pendientes → reciclar usados Y entregados huérfanos
-        if (pendientes < 500) {
-            const total = (usados || 0) + (entregados || 0);
+        // FIX 1: Reciclar también pendiente_nuevo y completado
+        // FIX 2: Si hay 0 pendientes, reciclar TODO sin importar el umbral
+        const umbral = (pendientes === 0) ? 999999 : 500;
+
+        if (pendientes < umbral) {
+            const { count: total } = await supabase
+                .from('servidores')
+                .select('*', { count: 'exact', head: true })
+                .in('estado', ['usado', 'entregado', 'completado', 'pendiente_nuevo']);
+
             if (total > 0) {
-                await Promise.all([
-                    supabase.from('servidores').update({ estado: 'pendiente' }).eq('estado', 'usado'),
-                    supabase.from('servidores').update({ estado: 'pendiente' }).eq('estado', 'entregado')
-                ]);
-                console.log(`♻️ Reciclados ${total} servidores → pendiente`);
+                await supabase
+                    .from('servidores')
+                    .update({ estado: 'pendiente' })
+                    .in('estado', ['usado', 'entregado', 'completado', 'pendiente_nuevo']);
+
+                console.log(`♻️ Reciclados ${total} servidores → pendiente (pendientes antes: ${pendientes})`);
             }
         }
 
@@ -66,8 +69,8 @@ async function manejarReciclaje() {
     }
 }
 
-// ✅ CORRE CADA 10 SEGUNDOS
-setInterval(manejarReciclaje, 10000);
+// ✅ CORRE CADA 3 SEGUNDOS (antes era 10, muy lento para 800 bots)
+setInterval(manejarReciclaje, 3000);
 
 // =====================================================
 // 📥 RUTA: RECIBIR HALLAZGO DESDE LOS BOTS
@@ -155,8 +158,8 @@ app.get('/get-server', async (req, res) => {
 
 // =====================================================
 // ⚡ RUTA: INYECTAR SERVIDORES NUEVOS (ADD-BULK)
-// Nuevos entran como pendiente_nuevo
-// Se borran los mismos N más antiguos para mantener 10k
+// FIX 3: Entran directo como 'pendiente' (antes era 'pendiente_nuevo')
+// Se borran los N más antiguos para mantener 10k
 // =====================================================
 app.post('/add-servers-bulk', async (req, res) => {
     const { job_ids } = req.body;
@@ -164,11 +167,11 @@ app.post('/add-servers-bulk', async (req, res) => {
 
     const cantidad = job_ids.length;
 
-    // Insertar nuevos como pendiente_nuevo
+    // FIX 3: Insertar directamente como 'pendiente', no 'pendiente_nuevo'
     const { error } = await supabase
         .from('servidores')
         .upsert(
-            job_ids.map(id => ({ job_id: id, estado: 'pendiente_nuevo' })),
+            job_ids.map(id => ({ job_id: id, estado: 'pendiente' })),
             { onConflict: 'job_id' }
         );
 
@@ -195,9 +198,13 @@ app.post('/add-servers-bulk', async (req, res) => {
 // 📊 RUTA: VER ESTADO DE LA COLA
 // =====================================================
 app.get('/status', async (req, res) => {
-    const { data, error } = await supabase.rpc('contar_pendientes');
-    if (error) return res.status(500).json(error);
-    res.json({ servidores_pendientes: data });
+    try {
+        const { data, error } = await supabase.rpc('contar_pendientes');
+        if (error) throw error;
+        res.json({ servidores_pendientes: data });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/', (req, res) => {
