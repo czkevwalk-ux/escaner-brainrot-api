@@ -62,20 +62,21 @@ async function manejarReciclaje() {
             }
         }
 
-        // ✅ FIX: Reciclar entregados huérfanos (bots que no reportaron en 5 min)
+        // ✅ FIX: Reciclar entregados huérfanos usando entregado_at
         const cincoMinutosAtras = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+
         const { count: huerfanos } = await supabase
             .from('servidores')
             .select('*', { count: 'exact', head: true })
             .eq('estado', 'entregado')
-            .lt('created_at', cincoMinutosAtras);
+            .lt('entregado_at', cincoMinutosAtras);
 
         if (huerfanos > 0) {
             await supabase
                 .from('servidores')
                 .update({ estado: 'pendiente' })
                 .eq('estado', 'entregado')
-                .lt('created_at', cincoMinutosAtras);
+                .lt('entregado_at', cincoMinutosAtras);
 
             console.log(`🔄 Rescatados ${huerfanos} entregados huérfanos → pendiente`);
         }
