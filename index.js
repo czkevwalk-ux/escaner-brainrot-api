@@ -44,9 +44,7 @@ async function manejarReciclaje() {
             .select('*', { count: 'exact', head: true })
             .eq('estado', 'pendiente');
 
-        // FIX 1: Reciclar también pendiente_nuevo y completado
-        // FIX 2: Si hay 0 pendientes, reciclar TODO sin importar el umbral
-        const umbral = (pendientes === 0) ? 999999 : 500;
+        const umbral = (pendientes === 0) ? 999999 : 9000;
 
         if (pendientes < umbral) {
             const { count: total } = await supabase
@@ -69,7 +67,7 @@ async function manejarReciclaje() {
     }
 }
 
-// ✅ CORRE CADA 3 SEGUNDOS (antes era 10, muy lento para 800 bots)
+// ✅ CORRE CADA 3 SEGUNDOS
 setInterval(manejarReciclaje, 3000);
 
 // =====================================================
@@ -158,7 +156,7 @@ app.get('/get-server', async (req, res) => {
 
 // =====================================================
 // ⚡ RUTA: INYECTAR SERVIDORES NUEVOS (ADD-BULK)
-// FIX 3: Entran directo como 'pendiente' (antes era 'pendiente_nuevo')
+// Entran directo como 'pendiente'
 // Se borran los N más antiguos para mantener 10k
 // =====================================================
 app.post('/add-servers-bulk', async (req, res) => {
@@ -167,7 +165,6 @@ app.post('/add-servers-bulk', async (req, res) => {
 
     const cantidad = job_ids.length;
 
-    // FIX 3: Insertar directamente como 'pendiente', no 'pendiente_nuevo'
     const { error } = await supabase
         .from('servidores')
         .upsert(
@@ -177,7 +174,7 @@ app.post('/add-servers-bulk', async (req, res) => {
 
     if (error) return res.status(500).json(error);
 
-    // Borrar los N más antiguos (pendiente o usado) para mantener 10k
+    // Borrar los N más antiguos para mantener 10k
     const { data: antiguos } = await supabase
         .from('servidores')
         .select('job_id')
