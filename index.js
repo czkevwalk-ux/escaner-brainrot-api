@@ -21,16 +21,14 @@ let stats = {
 
 // =====================================================
 // 🎯 ENRUTADOR: 3 VPS POR CANAL
-// VPS-1, VPS-2, VPS-3   → WEBHOOK_1
-// VPS-4, VPS-5, VPS-6   → WEBHOOK_2
-// VPS-7, VPS-8, VPS-9   → WEBHOOK_3
-// VPS-10, VPS-11, VPS-12 → WEBHOOK_4
-// VPS-13, VPS-14, VPS-15 → WEBHOOK_5
-// VPS-16, VPS-17, VPS-18, VPS-19, VPS-20 → WEBHOOK_6
 // =====================================================
 function getWebhookByVPS(vpsName) {
-    if (!vpsName) return process.env.WEBHOOK_1;
+    if (!vpsName) {
+        console.log('⚠️ vpsName vacío, usando WEBHOOK_1');
+        return process.env.WEBHOOK_1;
+    }
     const num = parseInt(vpsName.replace(/\D/g, '') || 0);
+    console.log(`🎯 VPS: ${vpsName} → número: ${num}`);
     if (num >= 1  && num <= 3)  return process.env.WEBHOOK_1;
     if (num >= 4  && num <= 6)  return process.env.WEBHOOK_2;
     if (num >= 7  && num <= 9)  return process.env.WEBHOOK_3;
@@ -87,42 +85,40 @@ app.post('/add-servers-bulk', (req, res) => {
 
 // =====================================================
 // 🔔 RUTA: NOTIFICAR HALLAZGO → ENRUTA A DISCORD
-// El bot manda el vps_name y Railway decide el canal
 // =====================================================
 app.post('/notify', async (req, res) => {
-    const { vps_name, job_id, player_count, highest_pet, other_pets } = req.body;
-    if (!highest_pet) return res.json({ status: "error" });
+    console.log('📩 /notify recibido');
+    console.log('📦 Body:', JSON.stringify(req.body).slice(0, 200));
 
-    const webhook = getWebhookByVPS(vps_name);
-    if (!webhook) return res.json({ status: "no_webhook" });
+    const { vps_name, payload } = req.body;
 
-    const joinLink = `https://www.roblox.com/games/start?placeId=109983668079237&gameInstanceId=${job_id}`;
-    const otherPetsText = other_pets && other_pets.length > 0 ? other_pets.join('\n') : 'None';
-    const duelStatus = highest_pet.duel ? '```✅ Active```' : '```❌ Inactive```';
-
-    const embed = {
-        color: 3447003,
-        fields: [
-            { name: '💎 Highest Pet', value: '```' + `${highest_pet.name} ${highest_pet.gen}` + '```', inline: false },
-            { name: '✨ Other Pets', value: '```' + otherPetsText + '```', inline: false },
-            { name: '🆔 Server ID', value: '```' + job_id + '```', inline: false },
-            { name: '🌐 Join Link', value: `[Click to Join](${joinLink})`, inline: true },
-            { name: '👥 Players', value: `${player_count}/8`, inline: true },
-            { name: '⚔️ Duel Mode', value: duelStatus, inline: true },
-            { name: '🤖 Bot', value: vps_name || 'Unknown', inline: true },
-        ],
-        footer: { text: 'Aether Scan • MidJourney' },
-        timestamp: new Date()
-    };
-
-    try {
-        await axios.post(webhook, { embeds: [embed] });
-        console.log(`📨 Notificación enviada → ${vps_name} → webhook canal`);
-    } catch (e) {
-        console.log(`❌ Error enviando a Discord: ${e.message}`);
+    if (!payload) {
+        console.log('❌ No hay payload');
+        return res.json({ status: "error", reason: "no payload" });
     }
 
-    res.json({ status: "ok" });
+    const webhook = getWebhookByVPS(vps_name);
+
+    if (!webhook) {
+        console.log('❌ Webhook no encontrado para VPS:', vps_name);
+        console.log('🔑 WEBHOOK_1 existe:', !!process.env.WEBHOOK_1);
+        console.log('🔑 WEBHOOK_2 existe:', !!process.env.WEBHOOK_2);
+        return res.json({ status: "error", reason: "no webhook" });
+    }
+
+    console.log('✅ Webhook encontrado, enviando a Discord...');
+
+    try {
+        await axios.post(webhook, payload);
+        console.log(`📨 Enviado exitosamente → ${vps_name}`);
+        res.json({ status: "ok" });
+    } catch (e) {
+        console.log(`❌ Error enviando a Discord: ${e.message}`);
+        if (e.response) {
+            console.log(`❌ Discord respondió: ${e.response.status} - ${JSON.stringify(e.response.data)}`);
+        }
+        res.json({ status: "error", reason: e.message });
+    }
 });
 
 // =====================================================
@@ -148,4 +144,10 @@ app.get('/', (req, res) => res.send('🛰️ Aether Scan API - Online'));
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
     console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+    console.log(`🔑 WEBHOOK_1: ${process.env.WEBHOOK_1 ? 'configurado' : 'FALTA'}`);
+    console.log(`🔑 WEBHOOK_2: ${process.env.WEBHOOK_2 ? 'configurado' : 'FALTA'}`);
+    console.log(`🔑 WEBHOOK_3: ${process.env.WEBHOOK_3 ? 'configurado' : 'FALTA'}`);
+    console.log(`🔑 WEBHOOK_4: ${process.env.WEBHOOK_4 ? 'configurado' : 'FALTA'}`);
+    console.log(`🔑 WEBHOOK_5: ${process.env.WEBHOOK_5 ? 'configurado' : 'FALTA'}`);
+    console.log(`🔑 WEBHOOK_6: ${process.env.WEBHOOK_6 ? 'configurado' : 'FALTA'}`);
 });
