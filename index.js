@@ -1,242 +1,89 @@
 const express = require('express');
-const { createClient } = require('@supabase/supabase-js');
-const bodyParser = require('body-parser');
-const axios = require('axios');
 
 const app = express();
-app.use(bodyParser.json());
-
-// 🔌 CONEXIÓN CON SUPABASE
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-
-// 🧠 CACHÉ PARA EVITAR DUPLICADOS EN DISCORD (5 MINUTOS)
-const processedJobs = new Set();
-
-// 🛠️ UTILIDAD: CONVERTIR VALORES (Ej: 1B -> 1000M) PARA FILTRADO
-function parseGenValue(text) {
-    if (!text) return 0;
-    const clean = text.toUpperCase().replace(/\s/g, '');
-    const num = parseFloat(clean.match(/\d+\.?\d*/) || 0);
-    if (clean.includes('B')) return num * 1000;
-    return num;
-}
-
-// 🎯 ENRUTADOR: 3 VPS POR CANAL (Soporta hasta 20 VPS)
-function getWebhookByVPS(vpsName) {
-    if (!vpsName) return process.env.WEBHOOK_1;
-    const num = parseInt(vpsName.replace(/\D/g, '') || 0);
-    if (num >= 1 && num <= 3) return process.env.WEBHOOK_1;
-    if (num >= 4 && num <= 6) return process.env.WEBHOOK_2;
-    if (num >= 7 && num <= 9) return process.env.WEBHOOK_3;
-    if (num >= 10 && num <= 12) return process.env.WEBHOOK_4;
-    if (num >= 13 && num <= 15) return process.env.WEBHOOK_5;
-    if (num >= 16) return process.env.WEBHOOK_6;
-    return process.env.WEBHOOK_1;
-}
+app.use(express.json());
 
 // =====================================================
-// 🔄 LÓGICA DE RECICLAJE (CORRE CADA 3 SEGUNDOS)
+// 💾 CACHE EN MEMORIA RAM
 // =====================================================
-async function manejarReciclaje() {
-    try {
-        const { count: pendientes } = await supabase
-            .from('servidores')
-            .select('*', { count: 'exact', head: true })
-            .in('estado', ['pendiente', 'pendiente_nuevo']);
+const CACHE_LIMIT = 250;
+let cache = [];
 
-        const umbral = (pendientes === 0) ? 999999 : 9000;
+// =====================================================
+// 📊 ESTADÍSTICAS
+// =====================================================
+let stats = {
+    jobs_assigned: 0,
+    total_received: 0,
+    active_bots: 0,
+};
 
-        if (pendientes < umbral) {
-            const { count: total } = await supabase
-                .from('servidores')
-                .select('*', { count: 'exact', head: true })
-                .in('estado', ['usado', 'completado']);
-
-            if (total > 0) {
-                await supabase
-                    .from('servidores')
-                    .update({ estado: 'pendiente' })
-                    .in('estado', ['usado', 'completado']);
-
-                console.log(`♻️ Reciclados ${total} servidores → pendiente`);
-            }
-        }
-
-        // ✅ FIX: Reciclar entregados huérfanos usando entregado_at
-        const cincoMinutosAtras = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-
-        const { count: huerfanos } = await supabase
-            .from('servidores')
-            .select('*', { count: 'exact', head: true })
-            .eq('estado', 'entregado')
-            .lt('entregado_at', cincoMinutosAtras);
-
-        if (huerfanos > 0) {
-            await supabase
-                .from('servidores')
-                .update({ estado: 'pendiente' })
-                .eq('estado', 'entregado')
-                .lt('entregado_at', cincoMinutosAtras);
-
-            console.log(`🔄 Rescatados ${huerfanos} entregados huérfanos → pendiente`);
-        }
-
-    } catch (err) {
-        console.log('❌ Error en manejarReciclaje:', err.message);
+// =====================================================
+// 📤 RUTA: ENTREGAR UN SERVIDOR
+// =====================================================
+app.get('/get-server', (req, res) => {
+    if (cache.length === 0) {
+        return res.json({ job_id: null });
     }
-}
-
-// ✅ CORRE CADA 3 SEGUNDOS
-setInterval(manejarReciclaje, 3000);
-
-// =====================================================
-// 📥 RUTA: RECIBIR HALLAZGO DESDE LOS BOTS
-// =====================================================
-app.post('/add-server', async (req, res) => {
-    const { jobId, brainrots, vps_name, players } = req.body;
-
-    if (processedJobs.has(jobId)) return res.json({ status: "skipped" });
-
-    if (brainrots && brainrots.length > 0) {
-        const petNames = brainrots.map(p => p.name).join(', ');
-        const topPet = brainrots[0];
-        await supabase.from('hallazgos').insert({
-            pet_name: petNames,
-            valor_gen: topPet.gen || topPet.value,
-            mutacion: topPet.mutation || "None",
-            job_id: jobId,
-            vps_name: vps_name
-        });
-
-        const highValue = brainrots.filter(p => parseGenValue(p.gen || p.value) >= 30);
-
-        if (highValue.length > 0) {
-            const target = getWebhookByVPS(vps_name);
-            if (target) {
-                processedJobs.add(jobId);
-                setTimeout(() => processedJobs.delete(jobId), 300000);
-
-                let petList = "";
-                highValue.forEach(p => {
-                    const price = p.gen || p.value;
-                    const mutationText = (p.mutation && p.mutation !== "None") ? ` (${p.mutation})` : "";
-                    petList += `💎 **${p.name}${mutationText}** ${price}\n`;
-                    if (p.inDuel) {
-                        petList += `⚠️ **EN DUELO**\n`;
-                    }
-                });
-
-                const joinerUrl = `https://plsbrainrot.me/joiner?placeId=109983668079237&gameInstanceId=${jobId}`;
-                const joinScript = `game:GetService("TeleportService"):TeleportToPlaceInstance(109983668079237, "${jobId}", game.Players.LocalPlayer)`;
-
-                const payload = {
-                    embeds: [{
-                        author: { name: 'Brainrot Notify | MidJourney' },
-                        title: `🔎 PET DETECTED (${highValue.length} Found)`,
-                        description: `**DETECTED PETS**\n\n${petList}\n` +
-                                     `🆔 **Job ID (PC)**\n\`${jobId}\`\n\n` +
-                                     `🆔 **Job ID (Mobile)**\n\`${jobId}\`\n\n` +
-                                     `🎮 **Players Online**\n${players || 1}/8\n\n` +
-                                     `🤖 **Bot**\n${vps_name}\n\n` +
-                                     `🔗 **Quick Join**\n[Click to Join](${joinerUrl})\n\n` +
-                                     `📜 **Join Script**\n\`\`\`lua\n${joinScript}\n\`\`\``,
-                        color: 5793266,
-                        timestamp: new Date()
-                    }]
-                };
-
-                axios.post(target, payload).catch(e => console.log("Error Discord"));
-            }
-        }
-    }
-
-    // ✅ Marca como usado
-    await supabase.from('servidores').update({ estado: 'usado' }).eq('job_id', jobId);
-
-    res.json({ status: "ok" });
+    const job_id = cache.shift();
+    stats.jobs_assigned++;
+    res.json({ job_id });
 });
 
 // =====================================================
-// 📤 RUTA: ENTREGAR SERVIDOR ÚNICO (GET-SERVER)
+// 📦 RUTA: ENTREGAR BATCH DE SERVIDORES
 // =====================================================
-app.get('/get-server', async (req, res) => {
-    try {
-        const { data, error } = await supabase.rpc('entregar_servidor_v3');
-        if (error) throw error;
-        if (data && data.length > 0) {
-            res.json({ job_id: data[0].id_servidor });
-        } else {
-            res.json({ job_id: null });
-        }
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+app.get('/get-batch', (req, res) => {
+    const count = parseInt(req.query.count) || 1;
+    const servers = [];
+    for (let i = 0; i < count && cache.length > 0; i++) {
+        servers.push({ job_id: cache.shift() });
+        stats.jobs_assigned++;
     }
+    res.json({ servers });
 });
 
 // =====================================================
-// ⚡ RUTA: INYECTAR SERVIDORES NUEVOS (ADD-BULK)
-// Entran como 'pendiente_nuevo' para tener prioridad
-// Solo borra antiguos cuando ya hay más de 15k
+// ⚡ RUTA: RECIBIR SERVIDORES DEL SCRAPER
 // =====================================================
-app.post('/add-servers-bulk', async (req, res) => {
+app.post('/add-servers-bulk', (req, res) => {
     const { job_ids } = req.body;
     if (!job_ids || job_ids.length === 0) return res.json({ status: "empty" });
 
-    const cantidad = job_ids.length;
-
-    const { error } = await supabase
-        .from('servidores')
-        .upsert(
-            job_ids.map(id => ({ job_id: id, estado: 'pendiente_nuevo' })),
-            { onConflict: 'job_id' }
-        );
-
-    if (error) return res.status(500).json(error);
-
-    // ✅ Solo borrar antiguos si ya hay más de 15k
-    const { count: totalActual } = await supabase
-        .from('servidores')
-        .select('*', { count: 'exact', head: true });
-
-    if (totalActual > 15000) {
-        const { data: antiguos } = await supabase
-            .from('servidores')
-            .select('job_id')
-            .in('estado', ['pendiente', 'usado'])
-            .order('created_at', { ascending: true })
-            .limit(cantidad);
-
-        if (antiguos && antiguos.length > 0) {
-            const idsABorrar = antiguos.map(s => s.job_id);
-            await supabase.from('servidores').delete().in('job_id', idsABorrar);
-            console.log(`🗑️ Borrados ${idsABorrar.length} servidores antiguos → reemplazados por ${cantidad} nuevos`);
+    let added = 0;
+    for (const id of job_ids) {
+        if (cache.length < CACHE_LIMIT) {
+            cache.push(id);
+            added++;
         }
-    } else {
-        console.log(`📥 Acumulando... Total actual: ${totalActual + cantidad} servidores`);
     }
 
-    res.json({ status: "ok", added: cantidad });
+    stats.total_received += job_ids.length;
+    console.log(`📥 Recibidos ${job_ids.length} → agregados ${added} → cache: ${cache.length}/${CACHE_LIMIT}`);
+    res.json({ status: "ok", added, cache: cache.length });
 });
 
 // =====================================================
-// 📊 RUTA: VER ESTADO DE LA COLA
+// 📊 RUTA: ESTADO DEL SISTEMA
 // =====================================================
-app.get('/status', async (req, res) => {
-    try {
-        const { data, error } = await supabase.rpc('contar_pendientes');
-        if (error) throw error;
-        res.json({ servidores_pendientes: data });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+app.get('/status', (req, res) => {
+    let health = "low";
+    if (cache.length > 100) health = "ok";
+    else if (cache.length > 30) health = "medium";
+
+    res.json({
+        health,
+        cache_jobs: cache.length,
+        cache_limit: CACHE_LIMIT,
+        jobs_assigned: stats.jobs_assigned,
+        total_received: stats.total_received,
+        active_bots: stats.active_bots,
+    });
 });
 
-app.get('/', (req, res) => {
-    res.send('🛰️ Sistema de Escaneo Industrial Activo');
-});
+app.get('/', (req, res) => res.send('🛰️ Aether Scan API - Online'));
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
     console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
-    manejarReciclaje();
 });
