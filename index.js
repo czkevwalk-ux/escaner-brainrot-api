@@ -11,11 +11,11 @@ const CACHE_LIMIT = 800;
 let cache = [];
 
 // =====================================================
-// 🧠 SET GLOBAL CON EXPIRACIÓN DE 4 MINUTOS
-// job_id usado → bloqueado 4 min → luego vuelve a ser nuevo
+// 🧠 SET GLOBAL CON EXPIRACIÓN DE 3 MINUTOS
+// job_id usado → bloqueado 3 min → luego vuelve a ser nuevo
 // =====================================================
-const EXPIRACION_MS = 4 * 60 * 1000; // 4 minutos
-const seenIds = new Map(); // job_id → timestamp cuando fue usado
+const EXPIRACION_MS = 3 * 60 * 1000; // 3 minutos
+const seenIds = new Map();
 
 // Limpieza automática cada 2 minutos
 setInterval(() => {
