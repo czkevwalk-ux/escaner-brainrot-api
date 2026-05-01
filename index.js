@@ -11,6 +11,12 @@ const CACHE_LIMIT = 250;
 let cache = [];
 
 // =====================================================
+// 🧠 SET GLOBAL DE TODOS LOS JOB_IDS VISTOS
+// Para detección 100% verídica de duplicados
+// =====================================================
+const seenIds = new Set();
+
+// =====================================================
 // 📊 ESTADÍSTICAS
 // =====================================================
 let stats = {
@@ -76,10 +82,13 @@ app.post('/add-servers-bulk', (req, res) => {
     const nuevosRepetidos = [];
 
     for (const id of job_ids) {
-        if (cacheSet.has(id)) {
+        if (seenIds.has(id)) {
+            // Ya fue visto alguna vez (100% verídico)
             nuevosRepetidos.push(id);
             repetidos++;
         } else {
+            // Nunca visto
+            seenIds.add(id);
             nuevosUnicos.push(id);
             unicos++;
         }
@@ -101,7 +110,7 @@ app.post('/add-servers-bulk', (req, res) => {
     stats.total_unicos += unicos;
     stats.total_repetidos += repetidos;
 
-    console.log(`📥 Recibidos ${job_ids.length} → únicos: ${unicos} al inicio | repetidos: ${repetidos} al final | cache: ${cache.length}/${CACHE_LIMIT}`);
+    console.log(`📥 Recibidos ${job_ids.length} → únicos: ${unicos} | repetidos: ${repetidos} | cache: ${cache.length}/${CACHE_LIMIT} | total vistos: ${seenIds.size}`);
     res.json({ status: "ok", unicos, repetidos, cache: cache.length });
 });
 
@@ -147,6 +156,7 @@ app.get('/status', (req, res) => {
         total_unicos: stats.total_unicos,
         total_repetidos: stats.total_repetidos,
         porcentaje_repetidos: porcentajeRepetidos + "%",
+        total_vistos_global: seenIds.size,
         active_bots: stats.active_bots,
     });
 });
