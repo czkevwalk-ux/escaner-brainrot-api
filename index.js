@@ -11,10 +11,24 @@ const CACHE_LIMIT = 250;
 let cache = [];
 
 // =====================================================
-// 🧠 SET GLOBAL DE TODOS LOS JOB_IDS VISTOS
-// Para detección 100% verídica de duplicados
+// 🧠 SET GLOBAL CON EXPIRACIÓN DE 5 MINUTOS
+// job_id usado → bloqueado 5 min → luego vuelve a ser nuevo
 // =====================================================
-const seenIds = new Set();
+const EXPIRACION_MS = 5 * 60 * 1000; // 5 minutos
+const seenIds = new Map(); // job_id → timestamp cuando fue usado
+
+// Limpieza automática cada 2 minutos
+setInterval(() => {
+    const ahora = Date.now();
+    let limpios = 0;
+    for (const [id, timestamp] of seenIds.entries()) {
+        if (ahora - timestamp > EXPIRACION_MS) {
+            seenIds.delete(id);
+            limpios++;
+        }
+    }
+    if (limpios > 0) console.log(`🧹 Limpiados ${limpios} job_ids expirados | activos: ${seenIds.size}`);
+}, 2 * 60 * 1000);
 
 // =====================================================
 // 📊 ESTADÍSTICAS
@@ -44,12 +58,14 @@ function getWebhookByVPS(vpsName) {
 
 // =====================================================
 // 📤 RUTA: ENTREGAR UN SERVIDOR
+// Cuando se entrega → se marca como usado con timestamp
 // =====================================================
 app.get('/get-server', (req, res) => {
     if (cache.length === 0) {
         return res.json({ job_id: null });
     }
     const job_id = cache.shift();
+    seenIds.set(job_id, Date.now()); // marcar como usado ahora
     stats.jobs_assigned++;
     res.json({ job_id });
 });
@@ -61,7 +77,9 @@ app.get('/get-batch', (req, res) => {
     const count = parseInt(req.query.count) || 1;
     const servers = [];
     for (let i = 0; i < count && cache.length > 0; i++) {
-        servers.push({ job_id: cache.shift() });
+        const job_id = cache.shift();
+        seenIds.set(job_id, Date.now());
+        servers.push({ job_id });
         stats.jobs_assigned++;
     }
     res.json({ servers });
@@ -69,40 +87,38 @@ app.get('/get-batch', (req, res) => {
 
 // =====================================================
 // ⚡ RUTA: RECIBIR SERVIDORES DEL SCRAPER
+// Solo entran si no están bloqueados (o ya expiraron 5 min)
 // =====================================================
 app.post('/add-servers-bulk', (req, res) => {
     const { job_ids } = req.body;
     if (!job_ids || job_ids.length === 0) return res.json({ status: "empty" });
 
-    const cacheSet = new Set(cache);
+    const ahora = Date.now();
     let unicos = 0;
     let repetidos = 0;
-
-    const nuevosUnicos = [];
-    const nuevosRepetidos = [];
+    const cacheSet = new Set(cache);
 
     for (const id of job_ids) {
-        if (seenIds.has(id)) {
-            // Ya fue visto alguna vez (100% verídico)
-            nuevosRepetidos.push(id);
+        const usadoEn = seenIds.get(id);
+        const estaEnCache = cacheSet.has(id);
+
+        // Si está en cache ya → ignorar
+        if (estaEnCache) {
             repetidos++;
-        } else {
-            // Nunca visto
-            seenIds.add(id);
-            nuevosUnicos.push(id);
-            unicos++;
+            continue;
         }
-    }
 
-    for (let i = nuevosUnicos.length - 1; i >= 0; i--) {
-        if (cache.length < CACHE_LIMIT) {
-            cache.unshift(nuevosUnicos[i]);
+        // Si fue usado hace menos de 5 min → bloqueado
+        if (usadoEn && (ahora - usadoEn) < EXPIRACION_MS) {
+            repetidos++;
+            continue;
         }
-    }
 
-    for (const id of nuevosRepetidos) {
+        // Es nuevo o ya expiró → aceptar
         if (cache.length < CACHE_LIMIT) {
             cache.push(id);
+            cacheSet.add(id);
+            unicos++;
         }
     }
 
@@ -110,7 +126,7 @@ app.post('/add-servers-bulk', (req, res) => {
     stats.total_unicos += unicos;
     stats.total_repetidos += repetidos;
 
-    console.log(`📥 Recibidos ${job_ids.length} → únicos: ${unicos} | repetidos: ${repetidos} | cache: ${cache.length}/${CACHE_LIMIT} | total vistos: ${seenIds.size}`);
+    console.log(`📥 Recibidos ${job_ids.length} → aceptados: ${unicos} | bloqueados: ${repetidos} | cache: ${cache.length}/${CACHE_LIMIT} | bloqueados activos: ${seenIds.size}`);
     res.json({ status: "ok", unicos, repetidos, cache: cache.length });
 });
 
@@ -156,7 +172,7 @@ app.get('/status', (req, res) => {
         total_unicos: stats.total_unicos,
         total_repetidos: stats.total_repetidos,
         porcentaje_repetidos: porcentajeRepetidos + "%",
-        total_vistos_global: seenIds.size,
+        bloqueados_activos: seenIds.size,
         active_bots: stats.active_bots,
     });
 });
