@@ -6,15 +6,10 @@ app.use(express.json());
 
 // =====================================================
 // 💾 CACHE EN MEMORIA RAM
+// Nuevos únicos van al INICIO → bots siempre reciben los más frescos
 // =====================================================
 const CACHE_LIMIT = 250;
 let cache = [];
-
-// =====================================================
-// 🔒 BLOQUEO DE 2 SEGUNDOS AL ENTREGAR
-// Evita que 2 bots vayan al mismo servidor
-// =====================================================
-const recentlyDelivered = new Map();
 
 // =====================================================
 // 📊 ESTADÍSTICAS
@@ -47,27 +42,7 @@ app.get('/get-server', (req, res) => {
     if (cache.length === 0) {
         return res.json({ job_id: null });
     }
-
-    // Buscar uno que no esté bloqueado
-    let job_id = null;
-    for (let i = 0; i < cache.length; i++) {
-        if (!recentlyDelivered.has(cache[i])) {
-            job_id = cache.splice(i, 1)[0];
-            break;
-        }
-    }
-
-    // Si todos están bloqueados, dar el primero igual
-    if (!job_id && cache.length > 0) {
-        job_id = cache.shift();
-    }
-
-    if (!job_id) return res.json({ job_id: null });
-
-    // Bloquear por 2 segundos
-    recentlyDelivered.set(job_id, Date.now());
-    setTimeout(() => recentlyDelivered.delete(job_id), 2000);
-
+    const job_id = cache.shift();
     stats.jobs_assigned++;
     res.json({ job_id });
 });
@@ -79,22 +54,7 @@ app.get('/get-batch', (req, res) => {
     const count = parseInt(req.query.count) || 1;
     const servers = [];
     for (let i = 0; i < count && cache.length > 0; i++) {
-        let job_id = null;
-        for (let j = 0; j < cache.length; j++) {
-            if (!recentlyDelivered.has(cache[j])) {
-                job_id = cache.splice(j, 1)[0];
-                break;
-            }
-        }
-        if (!job_id && cache.length > 0) {
-            job_id = cache.shift();
-        }
-        if (!job_id) break;
-
-        recentlyDelivered.set(job_id, Date.now());
-        setTimeout(() => recentlyDelivered.delete(job_id), 2000);
-
-        servers.push({ job_id });
+        servers.push({ job_id: cache.shift() });
         stats.jobs_assigned++;
     }
     res.json({ servers });
@@ -102,22 +62,48 @@ app.get('/get-batch', (req, res) => {
 
 // =====================================================
 // ⚡ RUTA: RECIBIR SERVIDORES DEL SCRAPER
+// Únicos → van al INICIO (prioridad, más frescos)
+// Repetidos → van al FINAL (relleno)
 // =====================================================
 app.post('/add-servers-bulk', (req, res) => {
     const { job_ids } = req.body;
     if (!job_ids || job_ids.length === 0) return res.json({ status: "empty" });
 
-    let added = 0;
+    const cacheSet = new Set(cache);
+    let unicos = 0;
+    let repetidos = 0;
+
+    // Separar únicos de repetidos
+    const nuevosUnicos = [];
+    const nuevosRepetidos = [];
+
     for (const id of job_ids) {
+        if (cacheSet.has(id)) {
+            nuevosRepetidos.push(id);
+            repetidos++;
+        } else {
+            nuevosUnicos.push(id);
+            unicos++;
+        }
+    }
+
+    // Meter únicos al INICIO (prioridad)
+    for (let i = nuevosUnicos.length - 1; i >= 0; i--) {
+        if (cache.length < CACHE_LIMIT) {
+            cache.unshift(nuevosUnicos[i]);
+        }
+    }
+
+    // Si cache no está lleno, rellenar con repetidos al FINAL
+    for (const id of nuevosRepetidos) {
         if (cache.length < CACHE_LIMIT) {
             cache.push(id);
-            added++;
         }
     }
 
     stats.total_received += job_ids.length;
-    console.log(`📥 Recibidos ${job_ids.length} → agregados ${added} → cache: ${cache.length}/${CACHE_LIMIT}`);
-    res.json({ status: "ok", added, cache: cache.length });
+    console.log(`📥 Recibidos ${job_ids.length} → únicos: ${unicos} al inicio | repetidos: ${repetidos} al final | cache: ${cache.length}/${CACHE_LIMIT}`);
+    res.json({ status: "ok", unicos, repetidos, cache: cache.length });
 });
 
 // =====================================================
