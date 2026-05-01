@@ -11,6 +11,12 @@ const CACHE_LIMIT = 250;
 let cache = [];
 
 // =====================================================
+// 🔒 BLOQUEO DE 2 SEGUNDOS AL ENTREGAR
+// Evita que 2 bots vayan al mismo servidor
+// =====================================================
+const recentlyDelivered = new Map();
+
+// =====================================================
 // 📊 ESTADÍSTICAS
 // =====================================================
 let stats = {
@@ -23,12 +29,8 @@ let stats = {
 // 🎯 ENRUTADOR: 3 VPS POR CANAL
 // =====================================================
 function getWebhookByVPS(vpsName) {
-    if (!vpsName) {
-        console.log('⚠️ vpsName vacío, usando WEBHOOK_1');
-        return process.env.WEBHOOK_1;
-    }
+    if (!vpsName) return process.env.WEBHOOK_1;
     const num = parseInt(vpsName.replace(/\D/g, '') || 0);
-    console.log(`🎯 VPS: ${vpsName} → número: ${num}`);
     if (num >= 1  && num <= 3)  return process.env.WEBHOOK_1;
     if (num >= 4  && num <= 6)  return process.env.WEBHOOK_2;
     if (num >= 7  && num <= 9)  return process.env.WEBHOOK_3;
@@ -45,7 +47,27 @@ app.get('/get-server', (req, res) => {
     if (cache.length === 0) {
         return res.json({ job_id: null });
     }
-    const job_id = cache.shift();
+
+    // Buscar uno que no esté bloqueado
+    let job_id = null;
+    for (let i = 0; i < cache.length; i++) {
+        if (!recentlyDelivered.has(cache[i])) {
+            job_id = cache.splice(i, 1)[0];
+            break;
+        }
+    }
+
+    // Si todos están bloqueados, dar el primero igual
+    if (!job_id && cache.length > 0) {
+        job_id = cache.shift();
+    }
+
+    if (!job_id) return res.json({ job_id: null });
+
+    // Bloquear por 2 segundos
+    recentlyDelivered.set(job_id, Date.now());
+    setTimeout(() => recentlyDelivered.delete(job_id), 2000);
+
     stats.jobs_assigned++;
     res.json({ job_id });
 });
@@ -57,7 +79,22 @@ app.get('/get-batch', (req, res) => {
     const count = parseInt(req.query.count) || 1;
     const servers = [];
     for (let i = 0; i < count && cache.length > 0; i++) {
-        servers.push({ job_id: cache.shift() });
+        let job_id = null;
+        for (let j = 0; j < cache.length; j++) {
+            if (!recentlyDelivered.has(cache[j])) {
+                job_id = cache.splice(j, 1)[0];
+                break;
+            }
+        }
+        if (!job_id && cache.length > 0) {
+            job_id = cache.shift();
+        }
+        if (!job_id) break;
+
+        recentlyDelivered.set(job_id, Date.now());
+        setTimeout(() => recentlyDelivered.delete(job_id), 2000);
+
+        servers.push({ job_id });
         stats.jobs_assigned++;
     }
     res.json({ servers });
@@ -87,36 +124,19 @@ app.post('/add-servers-bulk', (req, res) => {
 // 🔔 RUTA: NOTIFICAR HALLAZGO → ENRUTA A DISCORD
 // =====================================================
 app.post('/notify', async (req, res) => {
-    console.log('📩 /notify recibido');
-    console.log('📦 Body:', JSON.stringify(req.body).slice(0, 200));
-
     const { vps_name, payload } = req.body;
 
-    if (!payload) {
-        console.log('❌ No hay payload');
-        return res.json({ status: "error", reason: "no payload" });
-    }
+    if (!payload) return res.json({ status: "error", reason: "no payload" });
 
     const webhook = getWebhookByVPS(vps_name);
-
-    if (!webhook) {
-        console.log('❌ Webhook no encontrado para VPS:', vps_name);
-        console.log('🔑 WEBHOOK_1 existe:', !!process.env.WEBHOOK_1);
-        console.log('🔑 WEBHOOK_2 existe:', !!process.env.WEBHOOK_2);
-        return res.json({ status: "error", reason: "no webhook" });
-    }
-
-    console.log('✅ Webhook encontrado, enviando a Discord...');
+    if (!webhook) return res.json({ status: "error", reason: "no webhook" });
 
     try {
         await axios.post(webhook, payload);
-        console.log(`📨 Enviado exitosamente → ${vps_name}`);
+        console.log(`📨 Enviado → ${vps_name}`);
         res.json({ status: "ok" });
     } catch (e) {
-        console.log(`❌ Error enviando a Discord: ${e.message}`);
-        if (e.response) {
-            console.log(`❌ Discord respondió: ${e.response.status} - ${JSON.stringify(e.response.data)}`);
-        }
+        console.log(`❌ Error Discord: ${e.message}`);
         res.json({ status: "error", reason: e.message });
     }
 });
