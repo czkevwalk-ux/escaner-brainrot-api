@@ -14,7 +14,7 @@ let cache = [];
 // 🧠 SET GLOBAL CON EXPIRACIÓN DE 5 MINUTOS
 // job_id usado → bloqueado 5 min → luego vuelve a ser nuevo
 // =====================================================
-const EXPIRACION_MS = 5 * 60 * 1000; // 5 minutos
+const EXPIRACION_MS = 4 * 60 * 1000; // 4 minutos
 const seenIds = new Map(); // job_id → timestamp cuando fue usado
 
 // Limpieza automática cada 2 minutos
