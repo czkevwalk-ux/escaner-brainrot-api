@@ -6,7 +6,6 @@ app.use(express.json());
 
 // =====================================================
 // 💾 CACHE EN MEMORIA RAM
-// Nuevos únicos van al INICIO → bots siempre reciben los más frescos
 // =====================================================
 const CACHE_LIMIT = 250;
 let cache = [];
@@ -18,6 +17,8 @@ let stats = {
     jobs_assigned: 0,
     total_received: 0,
     active_bots: 0,
+    total_unicos: 0,
+    total_repetidos: 0,
 };
 
 // =====================================================
@@ -62,8 +63,6 @@ app.get('/get-batch', (req, res) => {
 
 // =====================================================
 // ⚡ RUTA: RECIBIR SERVIDORES DEL SCRAPER
-// Únicos → van al INICIO (prioridad, más frescos)
-// Repetidos → van al FINAL (relleno)
 // =====================================================
 app.post('/add-servers-bulk', (req, res) => {
     const { job_ids } = req.body;
@@ -73,7 +72,6 @@ app.post('/add-servers-bulk', (req, res) => {
     let unicos = 0;
     let repetidos = 0;
 
-    // Separar únicos de repetidos
     const nuevosUnicos = [];
     const nuevosRepetidos = [];
 
@@ -87,14 +85,12 @@ app.post('/add-servers-bulk', (req, res) => {
         }
     }
 
-    // Meter únicos al INICIO (prioridad)
     for (let i = nuevosUnicos.length - 1; i >= 0; i--) {
         if (cache.length < CACHE_LIMIT) {
             cache.unshift(nuevosUnicos[i]);
         }
     }
 
-    // Si cache no está lleno, rellenar con repetidos al FINAL
     for (const id of nuevosRepetidos) {
         if (cache.length < CACHE_LIMIT) {
             cache.push(id);
@@ -102,6 +98,9 @@ app.post('/add-servers-bulk', (req, res) => {
     }
 
     stats.total_received += job_ids.length;
+    stats.total_unicos += unicos;
+    stats.total_repetidos += repetidos;
+
     console.log(`📥 Recibidos ${job_ids.length} → únicos: ${unicos} al inicio | repetidos: ${repetidos} al final | cache: ${cache.length}/${CACHE_LIMIT}`);
     res.json({ status: "ok", unicos, repetidos, cache: cache.length });
 });
@@ -135,12 +134,19 @@ app.get('/status', (req, res) => {
     if (cache.length > 100) health = "ok";
     else if (cache.length > 30) health = "medium";
 
+    const porcentajeRepetidos = stats.total_received > 0
+        ? ((stats.total_repetidos / stats.total_received) * 100).toFixed(1)
+        : 0;
+
     res.json({
         health,
         cache_jobs: cache.length,
         cache_limit: CACHE_LIMIT,
         jobs_assigned: stats.jobs_assigned,
         total_received: stats.total_received,
+        total_unicos: stats.total_unicos,
+        total_repetidos: stats.total_repetidos,
+        porcentaje_repetidos: porcentajeRepetidos + "%",
         active_bots: stats.active_bots,
     });
 });
