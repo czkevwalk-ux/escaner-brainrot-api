@@ -7,12 +7,12 @@ app.use(express.json());
 // =====================================================
 // 💾 CACHE EN MEMORIA RAM
 // =====================================================
-const CACHE_LIMIT = 250;
+const CACHE_LIMIT = 800;
 let cache = [];
 
 // =====================================================
-// 🧠 SET GLOBAL CON EXPIRACIÓN DE 5 MINUTOS
-// job_id usado → bloqueado 5 min → luego vuelve a ser nuevo
+// 🧠 SET GLOBAL CON EXPIRACIÓN DE 4 MINUTOS
+// job_id usado → bloqueado 4 min → luego vuelve a ser nuevo
 // =====================================================
 const EXPIRACION_MS = 4 * 60 * 1000; // 4 minutos
 const seenIds = new Map(); // job_id → timestamp cuando fue usado
@@ -39,6 +39,7 @@ let stats = {
     active_bots: 0,
     total_unicos: 0,
     total_repetidos: 0,
+    total_cache_lleno: 0,
 };
 
 // =====================================================
@@ -58,14 +59,13 @@ function getWebhookByVPS(vpsName) {
 
 // =====================================================
 // 📤 RUTA: ENTREGAR UN SERVIDOR
-// Cuando se entrega → se marca como usado con timestamp
 // =====================================================
 app.get('/get-server', (req, res) => {
     if (cache.length === 0) {
         return res.json({ job_id: null });
     }
     const job_id = cache.shift();
-    seenIds.set(job_id, Date.now()); // marcar como usado ahora
+    seenIds.set(job_id, Date.now());
     stats.jobs_assigned++;
     res.json({ job_id });
 });
@@ -87,7 +87,6 @@ app.get('/get-batch', (req, res) => {
 
 // =====================================================
 // ⚡ RUTA: RECIBIR SERVIDORES DEL SCRAPER
-// Solo entran si no están bloqueados (o ya expiraron 5 min)
 // =====================================================
 app.post('/add-servers-bulk', (req, res) => {
     const { job_ids } = req.body;
@@ -96,37 +95,38 @@ app.post('/add-servers-bulk', (req, res) => {
     const ahora = Date.now();
     let unicos = 0;
     let repetidos = 0;
+    let cacheLleno = 0;
     const cacheSet = new Set(cache);
 
     for (const id of job_ids) {
         const usadoEn = seenIds.get(id);
         const estaEnCache = cacheSet.has(id);
 
-        // Si está en cache ya → ignorar
         if (estaEnCache) {
             repetidos++;
             continue;
         }
 
-        // Si fue usado hace menos de 5 min → bloqueado
         if (usadoEn && (ahora - usadoEn) < EXPIRACION_MS) {
             repetidos++;
             continue;
         }
 
-        // Es nuevo o ya expiró → aceptar
         if (cache.length < CACHE_LIMIT) {
             cache.push(id);
             cacheSet.add(id);
             unicos++;
+        } else {
+            cacheLleno++;
         }
     }
 
     stats.total_received += job_ids.length;
     stats.total_unicos += unicos;
     stats.total_repetidos += repetidos;
+    stats.total_cache_lleno += cacheLleno;
 
-    console.log(`📥 Recibidos ${job_ids.length} → aceptados: ${unicos} | bloqueados: ${repetidos} | cache: ${cache.length}/${CACHE_LIMIT} | bloqueados activos: ${seenIds.size}`);
+    console.log(`📥 Recibidos ${job_ids.length} → aceptados: ${unicos} | bloqueados: ${repetidos} | cache lleno: ${cacheLleno} | cache: ${cache.length}/${CACHE_LIMIT} | bloqueados activos: ${seenIds.size}`);
     res.json({ status: "ok", unicos, repetidos, cache: cache.length });
 });
 
@@ -156,8 +156,8 @@ app.post('/notify', async (req, res) => {
 // =====================================================
 app.get('/status', (req, res) => {
     let health = "low";
-    if (cache.length > 100) health = "ok";
-    else if (cache.length > 30) health = "medium";
+    if (cache.length > 400) health = "ok";
+    else if (cache.length > 100) health = "medium";
 
     const porcentajeRepetidos = stats.total_received > 0
         ? ((stats.total_repetidos / stats.total_received) * 100).toFixed(1)
@@ -171,6 +171,7 @@ app.get('/status', (req, res) => {
         total_received: stats.total_received,
         total_unicos: stats.total_unicos,
         total_repetidos: stats.total_repetidos,
+        total_cache_lleno: stats.total_cache_lleno,
         porcentaje_repetidos: porcentajeRepetidos + "%",
         bloqueados_activos: seenIds.size,
         active_bots: stats.active_bots,
