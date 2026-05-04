@@ -15,7 +15,7 @@ let cache = [];
 // seenIds → bloqueados 3 min (ya visitados)
 // pendingIds → entregados pero sin confirmar
 // =====================================================
-const EXPIRACION_MS = 3 * 60 * 1000;
+const EXPIRACION_MS = 2 * 60 * 1000;
 const PENDING_TIMEOUT_MS = 30 * 1000; // 30 segundos para confirmar
 const seenIds = new Map();
 const pendingIds = new Map(); // job_id → timestamp entregado
