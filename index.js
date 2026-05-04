@@ -11,11 +11,14 @@ const CACHE_LIMIT = 800;
 let cache = [];
 
 // =====================================================
-// 🧠 SET GLOBAL CON EXPIRACIÓN DE 3 MINUTOS
-// job_id usado → bloqueado 3 min → luego vuelve a ser nuevo
+// 🧠 ESTADOS DE JOB_IDS
+// seenIds → bloqueados 3 min (ya visitados)
+// pendingIds → entregados pero sin confirmar
 // =====================================================
-const EXPIRACION_MS = 3 * 60 * 1000; // 3 minutos
+const EXPIRACION_MS = 3 * 60 * 1000;
+const PENDING_TIMEOUT_MS = 30 * 1000; // 30 segundos para confirmar
 const seenIds = new Map();
+const pendingIds = new Map(); // job_id → timestamp entregado
 
 // Limpieza automática cada 2 minutos
 setInterval(() => {
@@ -28,6 +31,19 @@ setInterval(() => {
         }
     }
     if (limpios > 0) console.log(`🧹 Limpiados ${limpios} job_ids expirados | activos: ${seenIds.size}`);
+
+    // Limpiar pendientes que nunca confirmaron (timeout 30s) → devolver al cache
+    let recuperados = 0;
+    for (const [id, timestamp] of pendingIds.entries()) {
+        if (ahora - timestamp > PENDING_TIMEOUT_MS) {
+            pendingIds.delete(id);
+            if (cache.length < CACHE_LIMIT) {
+                cache.push(id);
+                recuperados++;
+            }
+        }
+    }
+    if (recuperados > 0) console.log(`♻️ Recuperados ${recuperados} job_ids sin confirmar → cache`);
 }, 2 * 60 * 1000);
 
 // =====================================================
@@ -40,6 +56,8 @@ let stats = {
     total_unicos: 0,
     total_repetidos: 0,
     total_cache_lleno: 0,
+    total_confirmados: 0,
+    total_fallidos: 0,
 };
 
 // =====================================================
@@ -59,13 +77,14 @@ function getWebhookByVPS(vpsName) {
 
 // =====================================================
 // 📤 RUTA: ENTREGAR UN SERVIDOR
+// NO bloquea todavía → queda en pendingIds
 // =====================================================
 app.get('/get-server', (req, res) => {
     if (cache.length === 0) {
         return res.json({ job_id: null });
     }
     const job_id = cache.shift();
-    seenIds.set(job_id, Date.now());
+    pendingIds.set(job_id, Date.now()); // pendiente, sin confirmar
     stats.jobs_assigned++;
     res.json({ job_id });
 });
@@ -78,11 +97,46 @@ app.get('/get-batch', (req, res) => {
     const servers = [];
     for (let i = 0; i < count && cache.length > 0; i++) {
         const job_id = cache.shift();
-        seenIds.set(job_id, Date.now());
+        pendingIds.set(job_id, Date.now());
         servers.push({ job_id });
         stats.jobs_assigned++;
     }
     res.json({ servers });
+});
+
+// =====================================================
+// ✅ RUTA: CONFIRMAR ENTRADA EXITOSA
+// bot entró al servidor → ahora sí se bloquea 3 min
+// =====================================================
+app.post('/confirm-success', (req, res) => {
+    const { job_id } = req.body;
+    if (!job_id) return res.json({ status: "error", reason: "no job_id" });
+
+    pendingIds.delete(job_id);
+    seenIds.set(job_id, Date.now());
+    stats.total_confirmados++;
+
+    console.log(`✅ Confirmado: ${job_id} | bloqueado 3 min`);
+    res.json({ status: "ok" });
+});
+
+// =====================================================
+// ❌ RUTA: CONFIRMAR FALLO (servidor lleno, error 279, etc)
+// bot no pudo entrar → job_id vuelve al cache
+// =====================================================
+app.post('/confirm-fail', (req, res) => {
+    const { job_id } = req.body;
+    if (!job_id) return res.json({ status: "error", reason: "no job_id" });
+
+    pendingIds.delete(job_id);
+
+    if (cache.length < CACHE_LIMIT) {
+        cache.push(job_id);
+        stats.total_fallidos++;
+        console.log(`❌ Fallido: ${job_id} → devuelto al cache`);
+    }
+
+    res.json({ status: "ok" });
 });
 
 // =====================================================
@@ -101,8 +155,9 @@ app.post('/add-servers-bulk', (req, res) => {
     for (const id of job_ids) {
         const usadoEn = seenIds.get(id);
         const estaEnCache = cacheSet.has(id);
+        const estaPendiente = pendingIds.has(id);
 
-        if (estaEnCache) {
+        if (estaEnCache || estaPendiente) {
             repetidos++;
             continue;
         }
@@ -126,7 +181,7 @@ app.post('/add-servers-bulk', (req, res) => {
     stats.total_repetidos += repetidos;
     stats.total_cache_lleno += cacheLleno;
 
-    console.log(`📥 Recibidos ${job_ids.length} → aceptados: ${unicos} | bloqueados: ${repetidos} | cache lleno: ${cacheLleno} | cache: ${cache.length}/${CACHE_LIMIT} | bloqueados activos: ${seenIds.size}`);
+    console.log(`📥 Recibidos ${job_ids.length} → aceptados: ${unicos} | bloqueados: ${repetidos} | cache lleno: ${cacheLleno} | cache: ${cache.length}/${CACHE_LIMIT}`);
     res.json({ status: "ok", unicos, repetidos, cache: cache.length });
 });
 
@@ -172,6 +227,9 @@ app.get('/status', (req, res) => {
         total_unicos: stats.total_unicos,
         total_repetidos: stats.total_repetidos,
         total_cache_lleno: stats.total_cache_lleno,
+        total_confirmados: stats.total_confirmados,
+        total_fallidos: stats.total_fallidos,
+        pendientes_confirmar: pendingIds.size,
         porcentaje_repetidos: porcentajeRepetidos + "%",
         bloqueados_activos: seenIds.size,
         active_bots: stats.active_bots,
