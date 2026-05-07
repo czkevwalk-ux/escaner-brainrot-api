@@ -12,15 +12,18 @@ let cache = [];
 
 // =====================================================
 // 🧠 ESTADOS DE JOB_IDS
-// seenIds → bloqueados 3 min (ya visitados)
+// seenIds → bloqueados 1 min (ya visitados)
 // pendingIds → entregados pero sin confirmar
+// failCount → cuántas veces falló un jobId (máx 5)
 // =====================================================
-const EXPIRACION_MS = 2 * 60 * 1000;
+const EXPIRACION_MS = 1 * 60 * 1000; // 1 minuto
 const PENDING_TIMEOUT_MS = 30 * 1000; // 30 segundos para confirmar
+const MAX_FALLOS = 5;
 const seenIds = new Map();
-const pendingIds = new Map(); // job_id → timestamp entregado
+const pendingIds = new Map();
+const failCount = new Map();
 
-// Limpieza automática cada 2 minutos
+// Limpieza automática cada 1 minuto
 setInterval(() => {
     const ahora = Date.now();
     let limpios = 0;
@@ -32,7 +35,7 @@ setInterval(() => {
     }
     if (limpios > 0) console.log(`🧹 Limpiados ${limpios} job_ids expirados | activos: ${seenIds.size}`);
 
-    // Limpiar pendientes que nunca confirmaron (timeout 30s) → devolver al cache
+    // Limpiar pendientes que nunca confirmaron → devolver al cache
     let recuperados = 0;
     for (const [id, timestamp] of pendingIds.entries()) {
         if (ahora - timestamp > PENDING_TIMEOUT_MS) {
@@ -44,7 +47,7 @@ setInterval(() => {
         }
     }
     if (recuperados > 0) console.log(`♻️ Recuperados ${recuperados} job_ids sin confirmar → cache`);
-}, 2 * 60 * 1000);
+}, 60 * 1000);
 
 // =====================================================
 // 📊 ESTADÍSTICAS
@@ -58,6 +61,7 @@ let stats = {
     total_cache_lleno: 0,
     total_confirmados: 0,
     total_fallidos: 0,
+    total_descartados: 0,
 };
 
 // =====================================================
@@ -77,14 +81,13 @@ function getWebhookByVPS(vpsName) {
 
 // =====================================================
 // 📤 RUTA: ENTREGAR UN SERVIDOR
-// NO bloquea todavía → queda en pendingIds
 // =====================================================
 app.get('/get-server', (req, res) => {
     if (cache.length === 0) {
         return res.json({ job_id: null });
     }
     const job_id = cache.shift();
-    pendingIds.set(job_id, Date.now()); // pendiente, sin confirmar
+    pendingIds.set(job_id, Date.now());
     stats.jobs_assigned++;
     res.json({ job_id });
 });
@@ -106,34 +109,45 @@ app.get('/get-batch', (req, res) => {
 
 // =====================================================
 // ✅ RUTA: CONFIRMAR ENTRADA EXITOSA
-// bot entró al servidor → ahora sí se bloquea 3 min
 // =====================================================
 app.post('/confirm-success', (req, res) => {
     const { job_id } = req.body;
     if (!job_id) return res.json({ status: "error", reason: "no job_id" });
 
     pendingIds.delete(job_id);
+    failCount.delete(job_id); // resetear contador de fallos
     seenIds.set(job_id, Date.now());
     stats.total_confirmados++;
 
-    console.log(`✅ Confirmado: ${job_id} | bloqueado 3 min`);
+    console.log(`✅ Confirmado: ${job_id} | bloqueado 1 min`);
     res.json({ status: "ok" });
 });
 
 // =====================================================
-// ❌ RUTA: CONFIRMAR FALLO (servidor lleno, error 279, etc)
-// bot no pudo entrar → job_id vuelve al cache
+// ❌ RUTA: CONFIRMAR FALLO
+// Máximo 5 fallos → después se descarta
 // =====================================================
 app.post('/confirm-fail', (req, res) => {
     const { job_id } = req.body;
     if (!job_id) return res.json({ status: "error", reason: "no job_id" });
 
     pendingIds.delete(job_id);
+    stats.total_fallidos++;
 
-    if (cache.length < CACHE_LIMIT) {
-        cache.push(job_id);
-        stats.total_fallidos++;
-        console.log(`❌ Fallido: ${job_id} → devuelto al cache`);
+    const fallos = (failCount.get(job_id) || 0) + 1;
+
+    if (fallos >= MAX_FALLOS) {
+        // Descartar definitivamente
+        failCount.delete(job_id);
+        stats.total_descartados++;
+        console.log(`🗑️ Descartado: ${job_id} | falló ${fallos} veces`);
+    } else {
+        // Devolver al cache con contador actualizado
+        failCount.set(job_id, fallos);
+        if (cache.length < CACHE_LIMIT) {
+            cache.push(job_id);
+            console.log(`❌ Fallido: ${job_id} | fallo ${fallos}/${MAX_FALLOS} → devuelto al cache`);
+        }
     }
 
     res.json({ status: "ok" });
@@ -229,6 +243,7 @@ app.get('/status', (req, res) => {
         total_cache_lleno: stats.total_cache_lleno,
         total_confirmados: stats.total_confirmados,
         total_fallidos: stats.total_fallidos,
+        total_descartados: stats.total_descartados,
         pendientes_confirmar: pendingIds.size,
         porcentaje_repetidos: porcentajeRepetidos + "%",
         bloqueados_activos: seenIds.size,
