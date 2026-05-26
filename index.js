@@ -1,129 +1,71 @@
-/*
- * ═══════════════════════════════════════════════════════════════════════════
- *  Aether Scan API — Backend v2 (Freshness-First)
- * ═══════════════════════════════════════════════════════════════════════════
- *
- *  Cambios vs v1 (los 6 fixes auditados):
- *    1. LIFO en /get-server  (antes FIFO) → bots reciben ids MÁS frescos
- *    2. TTL por id en cache (15s) → auto-purga ids viejos antes de servirlos
- *    3. /confirm-fail bloquea 60s (antes re-cache hasta 5 veces) → no contamina
- *    4. cacheIdSet mantenido a nivel módulo → O(1) en dedup (antes O(n))
- *    5. CACHE_LIMIT 800 → 2000 (aprovecha RAM del plan Pro)
- *    6. failCount purga periódica → no más memory leak
- *
- *  API pública SIN CAMBIOS — clientes (scraper Python, Lua bots) intactos.
- * ═══════════════════════════════════════════════════════════════════════════
- */
-
 const express = require('express');
 const axios = require('axios');
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json());
 
 // =====================================================
-// 💾 CACHE EN MEMORIA — cada item: { id, pushedAt }
+// 💾 CACHE EN MEMORIA RAM
 // =====================================================
-const CACHE_LIMIT = 2000;                   // ↑ Pro plan: 8GB de RAM, podemos
-const FRESHNESS_TTL_MS = 15 * 1000;         // ⏱️ id stale después de 15s
-const CACHE_PURGE_INTERVAL_MS = 5 * 1000;   // purga cada 5s
-
-let cache = [];                              // [{id, pushedAt}, ...]  push al final, pop del final
-const cacheIdSet = new Set();                // 🚀 lookup O(1) para dedup
+const CACHE_LIMIT = 800;
+let cache = [];
 
 // =====================================================
 // 🧠 ESTADOS DE JOB_IDS
-//   seenIds      → bloqueados 60s (ya visitados o fallaron)
-//   pendingIds   → entregados al bot pero sin confirmar (30s)
-//   failCount    → contador de fallos por id (purga si > 5min sin update)
+// seenIds → bloqueados 1 min (ya visitados)
+// pendingIds → entregados pero sin confirmar
+// failCount → cuántas veces falló un jobId (máx 5)
 // =====================================================
-const EXPIRACION_MS         = 60 * 1000;    // 1 min bloqueo tras success o fail
-const PENDING_TIMEOUT_MS    = 30 * 1000;    // 30s para confirmar
-const MAX_FALLOS            = 3;            // ↓ 5 → 3 (menos retries de basura)
-const FAILCOUNT_GC_MS       = 5 * 60 * 1000;// purga failCount > 5min sin update
+const EXPIRACION_MS = 1 * 60 * 1000; // 1 minuto
+const PENDING_TIMEOUT_MS = 30 * 1000; // 30 segundos para confirmar
+const MAX_FALLOS = 5;
+const seenIds = new Map();
+const pendingIds = new Map();
+const failCount = new Map();
 
-const seenIds    = new Map();   // id → timestamp
-const pendingIds = new Map();   // id → timestamp
-const failCount  = new Map();   // id → { count, lastUpdate }
-
-// =====================================================
-// ⏱️ LIMPIEZA AUTOMÁTICA
-// =====================================================
-
-// (a) Cada 5s: purgar ids stale de la cache principal
-setInterval(() => {
-    const ahora = Date.now();
-    const before = cache.length;
-    const newCache = [];
-    for (const item of cache) {
-        if (ahora - item.pushedAt < FRESHNESS_TTL_MS) {
-            newCache.push(item);
-        } else {
-            cacheIdSet.delete(item.id);
-        }
-    }
-    cache = newCache;
-    const purged = before - cache.length;
-    if (purged > 0) {
-        console.log(`🧹 Purgados ${purged} ids stale (>${FRESHNESS_TTL_MS/1000}s) | cache: ${cache.length}/${CACHE_LIMIT}`);
-    }
-}, CACHE_PURGE_INTERVAL_MS);
-
-// (b) Cada 60s: limpiar seenIds, pendingIds, failCount
+// Limpieza automática cada 1 minuto
 setInterval(() => {
     const ahora = Date.now();
     let limpios = 0;
-
-    // seenIds expirados (>60s)
-    for (const [id, ts] of seenIds.entries()) {
-        if (ahora - ts > EXPIRACION_MS) {
+    for (const [id, timestamp] of seenIds.entries()) {
+        if (ahora - timestamp > EXPIRACION_MS) {
             seenIds.delete(id);
             limpios++;
         }
     }
-    if (limpios > 0) console.log(`🧹 seenIds: ${limpios} expirados | activos: ${seenIds.size}`);
+    if (limpios > 0) console.log(`🧹 Limpiados ${limpios} job_ids expirados | activos: ${seenIds.size}`);
 
-    // pendingIds que nunca confirmaron → bloquear en seenIds (NO devolver a cache)
-    // (un bot que no confirmó probablemente murió o el server estaba mal)
-    let huerfanos = 0;
-    for (const [id, ts] of pendingIds.entries()) {
-        if (ahora - ts > PENDING_TIMEOUT_MS) {
+    // Limpiar pendientes que nunca confirmaron → devolver al cache
+    let recuperados = 0;
+    for (const [id, timestamp] of pendingIds.entries()) {
+        if (ahora - timestamp > PENDING_TIMEOUT_MS) {
             pendingIds.delete(id);
-            seenIds.set(id, ahora); // bloquear 60s, no re-cachear
-            huerfanos++;
+            if (cache.length < CACHE_LIMIT) {
+                cache.push(id);
+                recuperados++;
+            }
         }
     }
-    if (huerfanos > 0) console.log(`⏱️  pendingIds: ${huerfanos} huérfanos → bloqueados 60s`);
-
-    // failCount: purgar entradas viejas (>5min sin update)
-    let failPurged = 0;
-    for (const [id, info] of failCount.entries()) {
-        if (ahora - info.lastUpdate > FAILCOUNT_GC_MS) {
-            failCount.delete(id);
-            failPurged++;
-        }
-    }
-    if (failPurged > 0) console.log(`🧹 failCount: ${failPurged} obsoletos`);
+    if (recuperados > 0) console.log(`♻️ Recuperados ${recuperados} job_ids sin confirmar → cache`);
 }, 60 * 1000);
 
 // =====================================================
 // 📊 ESTADÍSTICAS
 // =====================================================
-const stats = {
-    jobs_assigned:       0,
-    total_received:      0,
-    active_bots:         0,
-    total_unicos:        0,
-    total_repetidos:     0,
-    total_cache_lleno:   0,
-    total_confirmados:   0,
-    total_fallidos:      0,
-    total_descartados:   0,
-    total_stale_skipped: 0,  // ← NUEVO: ids servidos saltados por TTL
+let stats = {
+    jobs_assigned: 0,
+    total_received: 0,
+    active_bots: 0,
+    total_unicos: 0,
+    total_repetidos: 0,
+    total_cache_lleno: 0,
+    total_confirmados: 0,
+    total_fallidos: 0,
+    total_descartados: 0,
 };
 
 // =====================================================
-// 🎯 ENRUTADOR: 3 VPS POR CANAL DE DISCORD
+// 🎯 ENRUTADOR: 3 VPS POR CANAL
 // =====================================================
 function getWebhookByVPS(vpsName) {
     if (!vpsName) return process.env.WEBHOOK_1;
@@ -138,49 +80,30 @@ function getWebhookByVPS(vpsName) {
 }
 
 // =====================================================
-// 📤 RUTA: ENTREGAR UN SERVIDOR (LIFO + TTL CHECK)
+// 📤 RUTA: ENTREGAR UN SERVIDOR
 // =====================================================
-// Pop del final = id MÁS reciente. Skip si está stale (>15s).
 app.get('/get-server', (req, res) => {
-    const ahora = Date.now();
-    while (cache.length > 0) {
-        const item = cache.pop();                // ← LIFO (era shift = FIFO)
-        cacheIdSet.delete(item.id);
-
-        if (ahora - item.pushedAt > FRESHNESS_TTL_MS) {
-            stats.total_stale_skipped++;
-            continue;                             // descartar id viejo, probar el siguiente
-        }
-
-        pendingIds.set(item.id, ahora);
-        stats.jobs_assigned++;
-        return res.json({ job_id: item.id });
+    if (cache.length === 0) {
+        return res.json({ job_id: null });
     }
-    return res.json({ job_id: null });
+    const job_id = cache.shift();
+    pendingIds.set(job_id, Date.now());
+    stats.jobs_assigned++;
+    res.json({ job_id });
 });
 
 // =====================================================
-// 📦 RUTA: ENTREGAR BATCH DE SERVIDORES (LIFO + TTL)
+// 📦 RUTA: ENTREGAR BATCH DE SERVIDORES
 // =====================================================
 app.get('/get-batch', (req, res) => {
-    const count = Math.max(1, Math.min(parseInt(req.query.count) || 1, 20));
-    const ahora = Date.now();
+    const count = parseInt(req.query.count) || 1;
     const servers = [];
-
-    while (servers.length < count && cache.length > 0) {
-        const item = cache.pop();                // LIFO
-        cacheIdSet.delete(item.id);
-
-        if (ahora - item.pushedAt > FRESHNESS_TTL_MS) {
-            stats.total_stale_skipped++;
-            continue;
-        }
-
-        pendingIds.set(item.id, ahora);
-        servers.push({ job_id: item.id });
+    for (let i = 0; i < count && cache.length > 0; i++) {
+        const job_id = cache.shift();
+        pendingIds.set(job_id, Date.now());
+        servers.push({ job_id });
         stats.jobs_assigned++;
     }
-
     res.json({ servers });
 });
 
@@ -192,21 +115,18 @@ app.post('/confirm-success', (req, res) => {
     if (!job_id) return res.json({ status: "error", reason: "no job_id" });
 
     pendingIds.delete(job_id);
-    failCount.delete(job_id);
+    failCount.delete(job_id); // resetear contador de fallos
     seenIds.set(job_id, Date.now());
     stats.total_confirmados++;
 
+    console.log(`✅ Confirmado: ${job_id} | bloqueado 1 min`);
     res.json({ status: "ok" });
 });
 
 // =====================================================
-// ❌ RUTA: CONFIRMAR FALLO  (NO re-cachea, va a seenIds)
+// ❌ RUTA: CONFIRMAR FALLO
+// Máximo 5 fallos → después se descarta
 // =====================================================
-// Cambio crítico vs v1: el id fallido NO regresa al cache.
-// Va a seenIds (bloqueado 60s). Razón: en Steal a Brainrot, un fallo
-// significa "server lleno" o "server muerto" — re-intentarlo en segundos
-// es desperdiciar bot-time. Si en 60s sigue listado en /servers/Public,
-// el scraper lo recapturará naturalmente.
 app.post('/confirm-fail', (req, res) => {
     const { job_id } = req.body;
     if (!job_id) return res.json({ status: "error", reason: "no job_id" });
@@ -214,18 +134,21 @@ app.post('/confirm-fail', (req, res) => {
     pendingIds.delete(job_id);
     stats.total_fallidos++;
 
-    // Trackeamos el fail count para logs/debug, pero NO devolvemos al cache
-    const prev = failCount.get(job_id) || { count: 0, lastUpdate: 0 };
-    const newCount = prev.count + 1;
-    failCount.set(job_id, { count: newCount, lastUpdate: Date.now() });
+    const fallos = (failCount.get(job_id) || 0) + 1;
 
-    if (newCount >= MAX_FALLOS) {
+    if (fallos >= MAX_FALLOS) {
+        // Descartar definitivamente
         failCount.delete(job_id);
         stats.total_descartados++;
+        console.log(`🗑️ Descartado: ${job_id} | falló ${fallos} veces`);
+    } else {
+        // Devolver al cache con contador actualizado
+        failCount.set(job_id, fallos);
+        if (cache.length < CACHE_LIMIT) {
+            cache.push(job_id);
+            console.log(`❌ Fallido: ${job_id} | fallo ${fallos}/${MAX_FALLOS} → devuelto al cache`);
+        }
     }
-
-    // Bloquear 60s para que el scraper no lo re-suba inmediatamente
-    seenIds.set(job_id, Date.now());
 
     res.json({ status: "ok" });
 });
@@ -238,39 +161,41 @@ app.post('/add-servers-bulk', (req, res) => {
     if (!job_ids || job_ids.length === 0) return res.json({ status: "empty" });
 
     const ahora = Date.now();
-    let unicos = 0, repetidos = 0, cacheLleno = 0;
+    let unicos = 0;
+    let repetidos = 0;
+    let cacheLleno = 0;
+    const cacheSet = new Set(cache);
 
     for (const id of job_ids) {
-        // O(1) checks via Sets/Maps
-        if (cacheIdSet.has(id))     { repetidos++; continue; }
-        if (pendingIds.has(id))     { repetidos++; continue; }
+        const usadoEn = seenIds.get(id);
+        const estaEnCache = cacheSet.has(id);
+        const estaPendiente = pendingIds.has(id);
 
-        const visto = seenIds.get(id);
-        if (visto && (ahora - visto) < EXPIRACION_MS) {
+        if (estaEnCache || estaPendiente) {
             repetidos++;
             continue;
         }
 
-        if (cache.length >= CACHE_LIMIT) {
-            cacheLleno++;
+        if (usadoEn && (ahora - usadoEn) < EXPIRACION_MS) {
+            repetidos++;
             continue;
         }
 
-        cache.push({ id, pushedAt: ahora });
-        cacheIdSet.add(id);
-        unicos++;
+        if (cache.length < CACHE_LIMIT) {
+            cache.push(id);
+            cacheSet.add(id);
+            unicos++;
+        } else {
+            cacheLleno++;
+        }
     }
 
-    stats.total_received   += job_ids.length;
-    stats.total_unicos     += unicos;
-    stats.total_repetidos  += repetidos;
+    stats.total_received += job_ids.length;
+    stats.total_unicos += unicos;
+    stats.total_repetidos += repetidos;
     stats.total_cache_lleno += cacheLleno;
 
-    // Log compacto (no se va para arriba como antes con cada batch)
-    if (unicos > 0 || cacheLleno > 0) {
-        console.log(`📥 ${job_ids.length} → +${unicos} ✅ | ${repetidos} 🔁 | ${cacheLleno} 🚫 | cache: ${cache.length}/${CACHE_LIMIT}`);
-    }
-
+    console.log(`📥 Recibidos ${job_ids.length} → aceptados: ${unicos} | bloqueados: ${repetidos} | cache lleno: ${cacheLleno} | cache: ${cache.length}/${CACHE_LIMIT}`);
     res.json({ status: "ok", unicos, repetidos, cache: cache.length });
 });
 
@@ -286,11 +211,11 @@ app.post('/notify', async (req, res) => {
     if (!webhook) return res.json({ status: "error", reason: "no webhook" });
 
     try {
-        await axios.post(webhook, payload, { timeout: 5000 });
-        console.log(`📨 → Discord (${vps_name})`);
+        await axios.post(webhook, payload);
+        console.log(`📨 Enviado → ${vps_name}`);
         res.json({ status: "ok" });
     } catch (e) {
-        console.log(`❌ Webhook ${vps_name}: ${e.message}`);
+        console.log(`❌ Error Discord: ${e.message}`);
         res.json({ status: "error", reason: e.message });
     }
 });
@@ -300,63 +225,41 @@ app.post('/notify', async (req, res) => {
 // =====================================================
 app.get('/status', (req, res) => {
     let health = "low";
-    if (cache.length > 400)      health = "ok";
+    if (cache.length > 400) health = "ok";
     else if (cache.length > 100) health = "medium";
 
     const porcentajeRepetidos = stats.total_received > 0
         ? ((stats.total_repetidos / stats.total_received) * 100).toFixed(1)
-        : "0.0";
-
-    // Edad del id más viejo en cache (útil para diagnóstico de freshness)
-    let oldest_age_s = null;
-    if (cache.length > 0) {
-        let oldest = cache[0].pushedAt;
-        for (const item of cache) {
-            if (item.pushedAt < oldest) oldest = item.pushedAt;
-        }
-        oldest_age_s = Math.round((Date.now() - oldest) / 1000);
-    }
+        : 0;
 
     res.json({
         health,
-        cache_jobs:           cache.length,
-        cache_limit:          CACHE_LIMIT,
-        cache_oldest_age_s:   oldest_age_s,
-        freshness_ttl_s:      FRESHNESS_TTL_MS / 1000,
-        jobs_assigned:        stats.jobs_assigned,
-        total_received:       stats.total_received,
-        total_unicos:         stats.total_unicos,
-        total_repetidos:      stats.total_repetidos,
-        total_cache_lleno:    stats.total_cache_lleno,
-        total_confirmados:    stats.total_confirmados,
-        total_fallidos:       stats.total_fallidos,
-        total_descartados:    stats.total_descartados,
-        total_stale_skipped:  stats.total_stale_skipped,
+        cache_jobs: cache.length,
+        cache_limit: CACHE_LIMIT,
+        jobs_assigned: stats.jobs_assigned,
+        total_received: stats.total_received,
+        total_unicos: stats.total_unicos,
+        total_repetidos: stats.total_repetidos,
+        total_cache_lleno: stats.total_cache_lleno,
+        total_confirmados: stats.total_confirmados,
+        total_fallidos: stats.total_fallidos,
+        total_descartados: stats.total_descartados,
         pendientes_confirmar: pendingIds.size,
         porcentaje_repetidos: porcentajeRepetidos + "%",
-        bloqueados_activos:   seenIds.size,
-        active_bots:          stats.active_bots,
+        bloqueados_activos: seenIds.size,
+        active_bots: stats.active_bots,
     });
 });
 
-app.get('/', (req, res) => res.send('🛰️ Aether Scan API v2 - Online (Freshness-First)'));
+app.get('/', (req, res) => res.send('🛰️ Aether Scan API - Online'));
 
-// =====================================================
-// 🚀 ARRANQUE
-// =====================================================
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-    console.log('═'.repeat(60));
-    console.log(`🚀 Aether Scan API v2 — puerto ${PORT}`);
-    console.log('═'.repeat(60));
-    console.log(`📦 CACHE_LIMIT:        ${CACHE_LIMIT}`);
-    console.log(`⏱️  FRESHNESS_TTL:      ${FRESHNESS_TTL_MS / 1000}s`);
-    console.log(`🚧 MAX_FALLOS:         ${MAX_FALLOS}`);
-    console.log(`🔁 Modo:               LIFO (entrega ids más frescos primero)`);
-    console.log('─'.repeat(60));
-    for (let i = 1; i <= 6; i++) {
-        const w = process.env[`WEBHOOK_${i}`];
-        console.log(`🔑 WEBHOOK_${i}: ${w ? '✅ configurado' : '❌ FALTA'}`);
-    }
-    console.log('═'.repeat(60));
+    console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+    console.log(`🔑 WEBHOOK_1: ${process.env.WEBHOOK_1 ? 'configurado' : 'FALTA'}`);
+    console.log(`🔑 WEBHOOK_2: ${process.env.WEBHOOK_2 ? 'configurado' : 'FALTA'}`);
+    console.log(`🔑 WEBHOOK_3: ${process.env.WEBHOOK_3 ? 'configurado' : 'FALTA'}`);
+    console.log(`🔑 WEBHOOK_4: ${process.env.WEBHOOK_4 ? 'configurado' : 'FALTA'}`);
+    console.log(`🔑 WEBHOOK_5: ${process.env.WEBHOOK_5 ? 'configurado' : 'FALTA'}`);
+    console.log(`🔑 WEBHOOK_6: ${process.env.WEBHOOK_6 ? 'configurado' : 'FALTA'}`);
 });
