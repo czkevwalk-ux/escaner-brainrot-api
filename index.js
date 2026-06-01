@@ -8,7 +8,7 @@ app.use(express.json());
 //  AETHER SCAN API  v2  -  cache FRESH-FIRST (LIFO)
 // =====================================================
 //  Cambios (investigados) vs la version FIFO:
-//   - Sirve el server MAS NUEVO primero (LIFO) -> los 1/8 frescos salen YA,1 
+//   - Sirve el server MAS NUEVO primero (LIFO) -> los 1/8 frescos salen YA,1 1
 //     que es justo lo que pide Steal a Brainrot (se llenan en segundos).
 //   - NUNCA descarta un server fresco: si el cache se llena, evicta el MAS VIEJO.
 //   - Cache mas grande (800 -> 3000) como buffer para ~800 bots (20 VPS x ~40).
