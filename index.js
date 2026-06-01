@@ -9,7 +9,7 @@ app.use(express.json());
 // =====================================================
 //  Cambios (investigados) vs la version FIFO original:
 //   - Orden de entrega CONFIGURABLE (SERVE_NEWEST_FIRST). Default FIFO = cobertura
-//     amplia: los Secrets suelen estar en servers ESTABLECIDOS, no en 1/8 vacios.a
+//     amplia: los Secrets suelen estar en servers ESTABLECIDOS, no en 1/8 vacios.a1
 //   - NUNCA descarta un server fresco: si el cache se llena, evicta el MAS VIEJO
 //     (la version original botaba el fresco -> ese era el bug real).
 //   - Dedup O(1) con un Set persistente (antes reconstruia un Set por request).
