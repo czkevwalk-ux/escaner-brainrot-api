@@ -5,7 +5,7 @@ const app = express();
 app.use(express.json());
 
 // =====================================================
-// 💾 CACHE EN MEMORIA RAMa212
+// 💾 CACHE EN MEMORIA RAMa212a
 // =====================================================
 const CACHE_LIMIT = 800;
 let cache = [];
