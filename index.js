@@ -206,7 +206,7 @@ app.post('/add-servers-bulk', (req, res) => {
         }
 
         if (cache.length < CACHE_LIMIT) {
-            cache.push(id);
+            cache.unshift(id); // frescos al frente → prioridad sobre los viejos
             cacheSet.add(id);
             unicos++;
         } else {
