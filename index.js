@@ -13,16 +13,16 @@ const CACHE_LIMIT = 2000;   // ← 2000 (antes 800) — absorbe bursts del scrap
 // =====================================================
 // 🧠 ESTADOS DE JOB_IDS
 // =====================================================
-const EXPIRACION_MS      = 30 * 1000;  // ← 30s (antes 60s) — servidores reciclan el DOBLE de rápido
-const PENDING_TIMEOUT_MS = 15 * 1000;  // ← 15s (antes 30s) — recupera más rápido los pendientes
-const MAX_FALLOS         = 3;          // ← 3 (antes 5) — descarta servidores malos antes
+const EXPIRACION_MS      = 45 * 1000;  // 45s — equilibrio entre flujo y no repetir servers
+const PENDING_TIMEOUT_MS = 15 * 1000;  // 15s — recupera rápido los pendientes sin confirmar
+const MAX_FALLOS         = 3;          // 3 fallos máx antes de descartar
 
 let cache = [];
 const seenIds    = new Map();
 const pendingIds = new Map();
 const failCount  = new Map();
 
-// Limpieza automática cada 30 segundos (antes 60s)
+// Limpieza automática cada 45 segundos
 setInterval(() => {
     const ahora = Date.now();
     let limpios = 0;
@@ -45,7 +45,7 @@ setInterval(() => {
         }
     }
     if (recuperados > 0) console.log(`♻️  Recuperados ${recuperados} pendientes → cache`);
-}, 30 * 1000);
+}, 45 * 1000);
 
 // =====================================================
 // 📊 ESTADÍSTICAS
