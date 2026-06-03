@@ -4,7 +4,7 @@ const axios = require('axios');
 const app = express();
 app.use(express.json({ limit: '4mb' }));
 
-// =====================================================
+// =====================================================2
 //  AETHER SCAN API — IDEAL (fresh-first + TTL + anti-llenos)
 // =====================================================
 //  Cambios vs el original (medidos en vivo: 82% de joins fallaban, 67k frescos
