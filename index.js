@@ -4,9 +4,8 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
-// =====================================================1
-// 💾 CACHE EN MEMORIA RAMa212
-// 💾 CACHE EN MEMORIA RAMa212a
+// =====================================================
+// 💾 CACHE EN MEMORIA RAM
 // =====================================================
 const CACHE_LIMIT = 800;
 let cache = [];
@@ -17,15 +16,12 @@ let cache = [];
 // pendingIds → entregados pero sin confirmar
 // failCount → cuántas veces falló un jobId (máx 5)
 // =====================================================
-const EXPIRACION_MS = 5 * 60 * 1000; // 5 minutos — evita repetir servidores ya visitados
-const PENDING_TIMEOUT_MS = 90 * 1000; // 90 segundos — bots lentos no pierden su servidor
-const MAX_FALLOS = 2; // descartar rápido: 2 fallos = servidor muerto
-// Backoff por fallo: fallo 1 → 30s, fallo 2 → 90s antes de volver al cache
-const BACKOFF_MS = [30_000, 90_000];
+const EXPIRACION_MS = 1 * 60 * 1000; // 1 minuto
+const PENDING_TIMEOUT_MS = 30 * 1000; // 30 segundos para confirmar
+const MAX_FALLOS = 5;
 const seenIds = new Map();
 const pendingIds = new Map();
 const failCount = new Map();
-const failCooldown = new Map(); // id → timestamp cuando puede volver al cache
 
 // Limpieza automática cada 1 minuto
 setInterval(() => {
@@ -51,27 +47,7 @@ setInterval(() => {
         }
     }
     if (recuperados > 0) console.log(`♻️ Recuperados ${recuperados} job_ids sin confirmar → cache`);
-
-    // Reinsertar servers con backoff cumplido
-    let reinsertados = 0;
-    for (const [id, readyAt] of failCooldown.entries()) {
-        if (ahora >= readyAt) {
-            failCooldown.delete(id);
-            if (cache.length < CACHE_LIMIT && !new Set(cache).has(id) && !pendingIds.has(id)) {
-                cache.push(id);
-                reinsertados++;
-            }
-        }
-    }
-    if (reinsertados > 0) console.log(`🔄 Reinsertados ${reinsertados} job_ids tras backoff | cache: ${cache.length}`);
-
-    // Limpiar failCount huérfanos (memoria)
-    for (const id of failCount.keys()) {
-        if (!new Set(cache).has(id) && !pendingIds.has(id) && !failCooldown.has(id)) {
-            failCount.delete(id);
-        }
-    }
-}, 10 * 1000); // revisar cada 10s para backoffs más precisos
+}, 60 * 1000);
 
 // =====================================================
 // 📊 ESTADÍSTICAS
@@ -163,15 +139,15 @@ app.post('/confirm-fail', (req, res) => {
     if (fallos >= MAX_FALLOS) {
         // Descartar definitivamente
         failCount.delete(job_id);
-        failCooldown.delete(job_id);
         stats.total_descartados++;
         console.log(`🗑️ Descartado: ${job_id} | falló ${fallos} veces`);
     } else {
-        // Backoff antes de volver al cache (no reinserción inmediata)
+        // Devolver al cache con contador actualizado
         failCount.set(job_id, fallos);
-        const delay = BACKOFF_MS[fallos - 1] || 45_000;
-        failCooldown.set(job_id, Date.now() + delay);
-        console.log(`❌ Fallido: ${job_id} | fallo ${fallos}/${MAX_FALLOS} → backoff ${delay/1000}s`);
+        if (cache.length < CACHE_LIMIT) {
+            cache.push(job_id);
+            console.log(`❌ Fallido: ${job_id} | fallo ${fallos}/${MAX_FALLOS} → devuelto al cache`);
+        }
     }
 
     res.json({ status: "ok" });
@@ -206,7 +182,7 @@ app.post('/add-servers-bulk', (req, res) => {
         }
 
         if (cache.length < CACHE_LIMIT) {
-            cache.unshift(id); // frescos al frente → prioridad sobre los viejos
+            cache.push(id);
             cacheSet.add(id);
             unicos++;
         } else {
