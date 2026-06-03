@@ -4,7 +4,7 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
-// =====================================================2
+// =====================================================
 // 💾 CACHE EN MEMORIA RAMa212
 // 💾 CACHE EN MEMORIA RAMa212a
 // =====================================================
@@ -17,11 +17,11 @@ let cache = [];
 // pendingIds → entregados pero sin confirmar
 // failCount → cuántas veces falló un jobId (máx 5)
 // =====================================================
-const EXPIRACION_MS = 1 * 60 * 1000; // 1 minuto
-const PENDING_TIMEOUT_MS = 30 * 1000; // 30 segundos para confirmar
+const EXPIRACION_MS = 5 * 60 * 1000; // 5 minutos — evita repetir servidores ya visitados
+const PENDING_TIMEOUT_MS = 90 * 1000; // 90 segundos — bots lentos no pierden su servidor
 const MAX_FALLOS = 2; // descartar rápido: 2 fallos = servidor muerto
-// Backoff por fallo: fallo 1 → 15s, fallo 2 → 45s antes de volver al cache
-const BACKOFF_MS = [15_000, 45_000];
+// Backoff por fallo: fallo 1 → 30s, fallo 2 → 90s antes de volver al cache
+const BACKOFF_MS = [30_000, 90_000];
 const seenIds = new Map();
 const pendingIds = new Map();
 const failCount = new Map();
