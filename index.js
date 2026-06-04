@@ -6,23 +6,23 @@ app.use(express.json());
 
 // =====================================================
 // 💾 CACHE EN MEMORIA RAM
-// OPTIMIZADO PARA 600 BOTS (15 VPS × 40)1
+// OPTIMIZADO PARA 600 BOTS (15 VPS × 40)
 // =====================================================
 const CACHE_LIMIT = 2000;   // ← 2000 (antes 800) — absorbe bursts del scraper
 
 // =====================================================
 // 🧠 ESTADOS DE JOB_IDS
 // =====================================================
-const EXPIRACION_MS      = 45 * 1000;  // 45s — equilibrio entre flujo y no repetir servers
-const PENDING_TIMEOUT_MS = 15 * 1000;  // 15s — recupera rápido los pendientes sin confirmar
-const MAX_FALLOS         = 3;          // 3 fallos máx antes de descartar
+const EXPIRACION_MS      = 60 * 1000;  // 60s
+const PENDING_TIMEOUT_MS = 30 * 1000;  // 30s — tiempo para que el bot procese su batch
+const MAX_FALLOS         = 3;
 
 let cache = [];
 const seenIds    = new Map();
 const pendingIds = new Map();
 const failCount  = new Map();
 
-// Limpieza automática cada 45 segundos
+// Limpieza automática cada 10 segundos — clave para recuperar pendientes rápido
 setInterval(() => {
     const ahora = Date.now();
     let limpios = 0;
@@ -44,11 +44,14 @@ setInterval(() => {
             }
         }
     }
-    if (recuperados > 0) console.log(`♻️  Recuperados ${recuperados} pendientes → cache`);
-}, 45 * 1000);
+    if (recuperados > 0) {
+        ventana.recuperados += recuperados;
+        console.log(`♻️  Recuperados ${recuperados} pendientes → cache | total pending: ${pendingIds.size}`);
+    }
+}, 10 * 1000);
 
 // =====================================================
-// 📊 ESTADÍSTICAS
+// 📊 ESTADÍSTICAS GLOBALES
 // =====================================================
 let stats = {
     jobs_assigned:      0,
@@ -60,6 +63,43 @@ let stats = {
     total_fallidos:     0,
     total_descartados:  0,
 };
+
+// =====================================================
+// 📈 VENTANA DE 30s PARA LOG DE EFICIENCIA
+// =====================================================
+let ventana = {
+    asignados:    0,   // servers entregados a bots
+    confirmados:  0,   // bots confirmaron éxito
+    fallidos:     0,   // bots confirmaron fallo
+    recuperados:  0,   // pendientes recuperados automáticamente
+    unicos:       0,   // nuevos únicos del scraper
+};
+
+setInterval(() => {
+    const { asignados, confirmados, fallidos, recuperados, unicos } = ventana;
+    const sinResponder  = asignados - confirmados - fallidos - recuperados;
+    const tasaExito     = asignados > 0 ? ((confirmados / asignados) * 100).toFixed(1) : '0.0';
+    const tasaRecupero  = asignados > 0 ? ((recuperados / asignados) * 100).toFixed(1) : '0.0';
+
+    let estado = '🔴';
+    if (confirmados >= asignados * 0.4) estado = '🟢';
+    else if (confirmados >= asignados * 0.2) estado = '🟡';
+
+    console.log(
+        `\n${estado} EFICIENCIA 30s ──────────────────────────────\n` +
+        `   Cache actual : ${cache.length}/${CACHE_LIMIT} | Pending: ${pendingIds.size} | Blocked: ${seenIds.size}\n` +
+        `   Entregados   : ${asignados} servers a bots\n` +
+        `   ✅ Confirmados: ${confirmados} (${tasaExito}%) — bots que llegaron exitosamente\n` +
+        `   ❌ Fallidos   : ${fallidos} — bots que no pudieron entrar\n` +
+        `   ♻️  Recuperados: ${recuperados} (${tasaRecupero}%) — sin confirmar, devueltos al cache\n` +
+        `   📥 Nuevos     : ${unicos} servers únicos del scraper\n` +
+        `   ❓ Sin resp   : ${Math.max(0, sinResponder)} — aún en vuelo\n` +
+        `─────────────────────────────────────────────────\n`
+    );
+
+    // Reinicia la ventana
+    ventana = { asignados: 0, confirmados: 0, fallidos: 0, recuperados: 0, unicos: 0 };
+}, 30 * 1000);
 
 // =====================================================
 // 🎯 ENRUTADOR: 3 VPS POR CANAL
@@ -84,6 +124,7 @@ app.get('/get-server', (req, res) => {
     const job_id = cache.shift();
     pendingIds.set(job_id, Date.now());
     stats.jobs_assigned++;
+    ventana.asignados++;
     res.json({ job_id });
 });
 
@@ -98,6 +139,7 @@ app.get('/get-batch', (req, res) => {
         pendingIds.set(job_id, Date.now());
         servers.push({ job_id });
         stats.jobs_assigned++;
+        ventana.asignados++;
     }
     res.json({ servers });
 });
@@ -111,8 +153,9 @@ app.post('/confirm-success', (req, res) => {
 
     pendingIds.delete(job_id);
     failCount.delete(job_id);
-    seenIds.set(job_id, Date.now()); // bloqueado 30s
+    seenIds.set(job_id, Date.now());
     stats.total_confirmados++;
+    ventana.confirmados++;
 
     res.json({ status: "ok" });
 });
@@ -126,6 +169,7 @@ app.post('/confirm-fail', (req, res) => {
 
     pendingIds.delete(job_id);
     stats.total_fallidos++;
+    ventana.fallidos++;
 
     const fallos = (failCount.get(job_id) || 0) + 1;
 
@@ -182,6 +226,7 @@ app.post('/add-servers-bulk', (req, res) => {
     stats.total_unicos      += unicos;
     stats.total_repetidos   += repetidos;
     stats.total_cache_lleno += cacheLleno;
+    ventana.unicos          += unicos;
 
     if (unicos > 0 || cacheLleno > 0) {
         console.log(
