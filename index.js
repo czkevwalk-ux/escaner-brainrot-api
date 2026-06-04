@@ -151,11 +151,16 @@ app.post('/confirm-success', (req, res) => {
     const { job_id } = req.body;
     if (!job_id) return res.json({ status: "error", reason: "no job_id" });
 
-    pendingIds.delete(job_id);
+    // delete() devuelve true si el id ESTABA en pending — si no, el cleanup ya lo recuperó
+    const estabaEnPending = pendingIds.delete(job_id);
     failCount.delete(job_id);
-    seenIds.set(job_id, Date.now());
-    stats.total_confirmados++;
-    ventana.confirmados++;
+
+    if (estabaEnPending) {
+        // Solo bloquear si realmente era nuestro — evita bloquear un server ya en cache
+        seenIds.set(job_id, Date.now());
+        stats.total_confirmados++;
+        ventana.confirmados++;
+    }
 
     res.json({ status: "ok" });
 });
@@ -167,9 +172,16 @@ app.post('/confirm-fail', (req, res) => {
     const { job_id } = req.body;
     if (!job_id) return res.json({ status: "error", reason: "no job_id" });
 
-    pendingIds.delete(job_id);
+    // delete() devuelve true solo si el id AÚN estaba en pending
+    // Si el cleanup ya lo recuperó al cache, NO volver a pushear — evita duplicados en cache
+    const estabaEnPending = pendingIds.delete(job_id);
     stats.total_fallidos++;
     ventana.fallidos++;
+
+    if (!estabaEnPending) {
+        // El cleanup ya lo devolvió al cache — ignorar para no duplicar
+        return res.json({ status: "ok" });
+    }
 
     const fallos = (failCount.get(job_id) || 0) + 1;
 
@@ -181,7 +193,6 @@ app.post('/confirm-fail', (req, res) => {
         failCount.set(job_id, fallos);
         if (cache.length < CACHE_LIMIT) {
             cache.push(job_id);
-            console.log(`❌ Fallo ${fallos}/${MAX_FALLOS}: ${job_id} → devuelto al cache`);
         }
     }
 
