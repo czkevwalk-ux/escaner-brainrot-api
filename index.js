@@ -6,7 +6,7 @@ app.use(express.json());
 
 // =====================================================
 // 💾 CACHE EN MEMORIA RAM
-// OPTIMIZADO PARA 600 BOTS (15 VPS × 40)
+// OPTIMIZADO PARA 600 BOTS (15 VPS × 40)1
 // =====================================================
 const CACHE_LIMIT = 2000;   // ← 2000 (antes 800) — absorbe bursts del scraper
 
