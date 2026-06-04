@@ -13,8 +13,8 @@ const CACHE_LIMIT = 2000;   // ← 2000 (antes 800) — absorbe bursts del scrap
 // =====================================================
 // 🧠 ESTADOS DE JOB_IDS
 // =====================================================
-const EXPIRACION_MS      = 60 * 1000;  // 60s
-const PENDING_TIMEOUT_MS = 30 * 1000;  // 30s — tiempo para que el bot procese su batch
+const EXPIRACION_MS      = 30 * 1000;  // 30s — recicla servers más rápido al scraper
+const PENDING_TIMEOUT_MS = 90 * 1000;  // 90s — BATCH=3 × 7s scan + 60s overhead TP/carga
 const MAX_FALLOS         = 3;
 
 let cache = [];
