@@ -4,8 +4,7 @@ const axios   = require('axios');
 const app = express();
 app.use(express.json());
 
-// =====================================================1234322
-// 💾 CACHE EN MEMORIA RAM
+// =====================================================12343222
 // OPTIMIZADO PARA 600 BOTS (15 VPS × 40)
 // =====================================================
 const CACHE_LIMIT = 2000;   // ← 2000 (antes 800) — absorbe bursts del scraper
